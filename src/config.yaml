@@ -2,7 +2,7 @@ stage: "STANDARD"
 in_channels: 14
 out_channels: 6
 num_levels: 32
-num_nodes: 2562
+num_nodes: 40962
 
 paths:
   zarr_store: "/scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data/gfs_icosahedral_m4.zarr"
@@ -11,15 +11,15 @@ paths:
   grid_ref: "/scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data/starviewergraphcast-grid/global_icosahedral_m4.20220101.t00z.1p00.f000.nc"
 
 model_params:
-  hierarchy_levels: [4, 3, 2, 1, 0]
+  hierarchy_levels: [6, 5, 4, 3, 2, 1, 0]
   history_steps: 2
   rollout_steps: 6
-  latent_dim: 512          # Scaled up from 256 to increase model capacity
+  latent_dim: 256
   processor_layers: 16
   learning_rate: 1.0e-04
 
 training_params:
-  batch_size: 2            # Adjusted for higher GPU memory usage
+  batch_size: 1            # Adjusted for higher GPU memory usage
   max_epochs: 25
   num_workers: 4
   gradient_clip_val: 0.5

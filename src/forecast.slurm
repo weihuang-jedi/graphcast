@@ -20,7 +20,7 @@ if [ -z "$CONDA_PREFIX" ]; then
    mamba activate anemoi
 fi
 
-cd /scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/src
+cd /scratch5/purged/Wei.Huang/src/graphcast/src
 
 # 1. Clean existing checkpoints and output caches
 rm -rf output/*.nc output_reconstructed/*.nc
@@ -29,9 +29,9 @@ rm -rf output/*.nc output_reconstructed/*.nc
 # sbatch training.slurm
 
 # 3. After training completes, run standard direct rollout
-PYTHONPATH=. python rollout/forecast_standard.py \
+PYTHONPATH=. python rollout/forecast.py \
     -c checkpoints/last.ckpt \
-    -i ../data/init_icosahedral_m4.20260201.t00z.1p00.f000.nc \
+    -i /scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data/init_icosahedral_m4.20260201.t00z.1p00.f000.nc \
     --init_time 2026020100 \
     -s 100 \
     --step_hours 24 \
@@ -39,17 +39,17 @@ PYTHONPATH=. python rollout/forecast_standard.py \
     --device cpu
 
 # 4. Cartesian 3D Spherical Regridder
-PYTHONPATH=. python rollout/reconstruct_forecast_latlon.py \
+PYTHONPATH=. python utils/reconstruct_forecast_latlon.py \
     --fcst_dir output \
-    --truth_ref ../data/nc_truth/gfs.20260201.t06z.1p00.f000.nc \
-    --grid_ref ../data/starviewergraphcast-grid/global_icosahedral_m4.20220101.t00z.1p00.f000.nc \
+    --truth_ref /scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data/nc_truth/gfs.20260201.t06z.1p00.f000.nc \
+    --grid_ref /scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data/starviewergraphcast-grid/global_icosahedral_m4.20220101.t00z.1p00.f000.nc \
     --out_dir output_reconstructed
 
 # 5. Verify Metrics and Display Diagnostic Maps
-python ../utils/plot_forecast_vs_truth.py \
+python utils/plot_forecast_vs_truth.py \
     --fcst_dir output_reconstructed \
     --level_idx 10 \
-    --truth_dir ../data/nc_truth \
+    --truth_dir /scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data/nc_truth \
     --init_time 2026020100 \
     --lead_times 480 960 1440 1920 2400 \
     --out_dir verification_plots \

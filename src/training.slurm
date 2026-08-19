@@ -3,7 +3,7 @@
 #SBATCH --account=epic
 #SBATCH --export=NONE
 #SBATCH --gres=gpu:h100:1
-#SBATCH --mem=128G
+#SBATCH --mem=256G
 #SBATCH --nodes=1
 #SBATCH --output=log.training_%J.out
 #SBATCH --partition=u1-h100

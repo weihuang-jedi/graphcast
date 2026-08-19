@@ -1,3 +1,6 @@
 log.*
 *.png
+checkpoints
 lightning_logs
+output
+output_reconstructed
