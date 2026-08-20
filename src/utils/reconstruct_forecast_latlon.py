@@ -11,6 +11,25 @@ import numpy as np
 import xarray as xr
 from scipy.spatial import cKDTree
 
+# Vertical interpolation from terrain-following eta levels to standard isobaric pressure levels
+from scipy.interpolate import interp1d
+
+def terrain_to_isobaric(field_3d, p_terrain_3d, target_pressures):
+    """
+    field_3d: (levels=32, nodes=40962)
+    p_terrain_3d: 3D pressure at each terrain node (levels=32, nodes=40962)
+    target_pressures: Standard GFS levels e.g. [1000, 925, 850, 700, 500, ...]
+    """
+    num_nodes = field_3d.shape[1]
+    out_isobaric = np.zeros((len(target_pressures), num_nodes), dtype=np.float32)
+
+    for i in range(num_nodes):
+        # 1D spline interpolation along vertical column i
+        f_interp = interp1d(p_terrain_3d[:, i], field_3d[:, i], bounds_error=False, fill_value="extrapolate")
+        out_isobaric[:, i] = f_interp(target_pressures)
+
+    return out_isobaric
+
 def regrid_forecasts(fcst_dir, truth_ref, grid_ref, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     

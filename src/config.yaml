@@ -4,14 +4,20 @@ out_channels: 6
 num_levels: 32
 num_nodes: 40962
 
+mesh:
+  num_nodes: 40962
+  num_levels: 32
+
 paths:
-  zarr_store: "/scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data/gfs_icosahedral_m4.zarr"
-  data_dir: "/scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data/gfs_icosahedral_m4.zarr"
-  graph_dir: "/scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/graph/starviewergraphcast-grid"
-  grid_ref: "/scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data/starviewergraphcast-grid/global_icosahedral_m4.20220101.t00z.1p00.f000.nc"
+  zarr_store: "/scratch5/purged/Wei.Huang/src/starviewerweathermodel/data/icosahedral_logstate.zarr"
+  data_dir: "/scratch5/purged/Wei.Huang/src/starviewerweathermodel/data/icosahedral_logstate.zarr"
+  graph_dir: "/scratch5/purged/Wei.Huang/src/starviewerweathermodel/graph/graph-grid"
+  grid_ref: "/scratch5/purged/Wei.Huang/src/starviewerweathermodel/data/icosahedral-grid/icosahedral_logstate_m6.20240101.t00z.0p25.f000.nc"
 
 model_params:
   hierarchy_levels: [6, 5, 4, 3, 2, 1, 0]
+  num_nodes: 40962
+  num_levels: 32
   history_steps: 2
   rollout_steps: 6
   latent_dim: 256

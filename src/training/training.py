@@ -71,7 +71,19 @@ class IcosahedralZarrDataset(Dataset):
 
         # Explicit Transpose to Nodes-First Layout: (nodes=2562, levels=32, history_steps=2, vars=6)
         input_nodes_first = np.transpose(input_arr, (2, 1, 0, 3))
-        x_flat = torch.tensor(input_nodes_first, dtype=torch.float32).reshape(n_nodes * num_levels, self.history_steps * 6)
+
+        # Convert array to tensor dynamically without hardcoded n_nodes multiplication
+        # input_tensor = torch.tensor(input_nodes_first, dtype=torch.float32)
+
+        # Verify actual array dimensions before reshaping:
+        # Expected layout: [Nodes, Levels, Channels] or [Channels, Levels, Nodes]
+        # if input_tensor.ndim > 2:
+        #     input_tensor = input_tensor.flatten(start_dim=0, end_dim=-2)
+
+        # 1. Input Features Tensor (around line 74)
+        input_tensor = torch.tensor(input_nodes_first, dtype=torch.float32)
+        # Use .reshape() or .contiguous().view() to handle non-contiguous memory layouts
+        x_flat = input_tensor.reshape(-1, self.history_steps * 6)
 
         # Load full target state at forecast step t_target
         target_vars = []
@@ -84,7 +96,11 @@ class IcosahedralZarrDataset(Dataset):
         # Target in Nodes-First Layout: (nodes=2562, levels=32, vars=6)
         target_arr = np.stack(target_vars, axis=-1)  # (levels, nodes, 6)
         target_nodes_first = np.transpose(target_arr, (1, 0, 2))  # (nodes, levels, 6)
-        y_flat = torch.tensor(target_nodes_first, dtype=torch.float32).reshape(n_nodes * num_levels, 6)
+
+        # 2. Target Features Tensor (around line 99)
+        target_tensor = torch.tensor(target_nodes_first, dtype=torch.float32)
+        # Use .reshape() or .contiguous().view() to handle non-contiguous memory layouts
+        y_flat = target_tensor.reshape(-1, 6)
 
         # Extract Unix timestamp
         time_val = self.ds["time"].isel(time=t_target).values
