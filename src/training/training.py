@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 3D GraphCast Lightning Training Executable for Standard Direct AI Weather Forecasting.
-Trains end-to-end on full state targets X_full with strict Nodes-First (2562, 32) memory layout.
+Formats batches into strict Nodes-First (40962, 32) layout for M6 terrain-following grids.
 """
 
 import os
@@ -19,13 +19,7 @@ from models.graphcast_lightning_direct import StandardGraphCastLitModule
 
 
 class IcosahedralZarrDataset(Dataset):
-    """
-    PyTorch Dataset wrapper for GraphCast icosahedral Zarr store.
-    Extracts history sequences (history_steps x 6 vars = 12 channels) and target steps (6 vars).
-    Formats tensors in strict Nodes-First layout: (nodes=2562, levels=32, channels).
-    """
-
-    def __init__(self, zarr_path: str, history_steps: int = 2, forecast_steps: int = 1):
+    def __init__(self, zarr_path: str, history_steps: int = 2, forecast_steps: int = 2):
         super().__init__()
         if not os.path.exists(zarr_path):
             raise FileNotFoundError(f"Zarr dataset store not found at '{zarr_path}'")
@@ -34,8 +28,9 @@ class IcosahedralZarrDataset(Dataset):
         self.history_steps = history_steps
         self.forecast_steps = forecast_steps
 
-        var_p = "p_icosahedral" if "p_icosahedral" in self.ds else ("P" if "P" in self.ds else "p")
-        var_t = "t_icosahedral" if "t_icosahedral" in self.ds else ("T" if "T" in self.ds else "t")
+        # Support both log-state and standard variable naming
+        var_p = "ln_p_icosahedral" if "ln_p_icosahedral" in self.ds else ("p_icosahedral" if "p_icosahedral" in self.ds else "p")
+        var_t = "ln_t_icosahedral" if "ln_t_icosahedral" in self.ds else ("t_icosahedral" if "t_icosahedral" in self.ds else "t")
         var_u = "u_icosahedral" if "u_icosahedral" in self.ds else ("U" if "U" in self.ds else "u")
 
         self.time_len = self.ds.sizes.get("time", self.ds.sizes.get("step", 0))
@@ -69,23 +64,11 @@ class IcosahedralZarrDataset(Dataset):
         input_arr = np.stack(input_vars, axis=-1)
         num_levels, n_nodes = input_arr.shape[1], input_arr.shape[2]
 
-        # Explicit Transpose to Nodes-First Layout: (nodes=2562, levels=32, history_steps=2, vars=6)
+        # Transpose to Nodes-First Layout: (nodes, levels, history_steps, vars)
         input_nodes_first = np.transpose(input_arr, (2, 1, 0, 3))
+        x_flat = torch.tensor(input_nodes_first, dtype=torch.float32).reshape(n_nodes * num_levels, self.history_steps * 6)
 
-        # Convert array to tensor dynamically without hardcoded n_nodes multiplication
-        # input_tensor = torch.tensor(input_nodes_first, dtype=torch.float32)
-
-        # Verify actual array dimensions before reshaping:
-        # Expected layout: [Nodes, Levels, Channels] or [Channels, Levels, Nodes]
-        # if input_tensor.ndim > 2:
-        #     input_tensor = input_tensor.flatten(start_dim=0, end_dim=-2)
-
-        # 1. Input Features Tensor (around line 74)
-        input_tensor = torch.tensor(input_nodes_first, dtype=torch.float32)
-        # Use .reshape() or .contiguous().view() to handle non-contiguous memory layouts
-        x_flat = input_tensor.reshape(-1, self.history_steps * 6)
-
-        # Load full target state at forecast step t_target
+        # Load target state
         target_vars = []
         for key in self.var_keys:
             if key in self.ds:
@@ -93,16 +76,10 @@ class IcosahedralZarrDataset(Dataset):
                 val = np.asarray(da.values, dtype=np.float32)  # (levels, nodes)
                 target_vars.append(val)
 
-        # Target in Nodes-First Layout: (nodes=2562, levels=32, vars=6)
         target_arr = np.stack(target_vars, axis=-1)  # (levels, nodes, 6)
         target_nodes_first = np.transpose(target_arr, (1, 0, 2))  # (nodes, levels, 6)
+        y_flat = torch.tensor(target_nodes_first, dtype=torch.float32).reshape(n_nodes * num_levels, 6)
 
-        # 2. Target Features Tensor (around line 99)
-        target_tensor = torch.tensor(target_nodes_first, dtype=torch.float32)
-        # Use .reshape() or .contiguous().view() to handle non-contiguous memory layouts
-        y_flat = target_tensor.reshape(-1, 6)
-
-        # Extract Unix timestamp
         time_val = self.ds["time"].isel(time=t_target).values
         timestamp_unix = float(np.datetime64(time_val, "s").astype(int))
 
@@ -110,8 +87,8 @@ class IcosahedralZarrDataset(Dataset):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train Standard Direct AI Weather Model")
-    parser.add_argument("-c", "--config", type=str, default="config_standard.yaml", help="Path to config file")
+    parser = argparse.ArgumentParser(description="Train Direct AI Weather Model")
+    parser.add_argument("-c", "--config", type=str, default="config_standard.yaml")
     return parser.parse_args()
 
 
@@ -125,20 +102,15 @@ def main():
         cfg = {}
 
     print("=" * 80)
-    print(" INITIALIZING STANDARD DIRECT AI WEATHER TRAINING RUN (NODES-FIRST LAYOUT)")
+    print(" INITIALIZING DIRECT GRAPHCAST TRAINING RUN (M6 GRID)")
     print("=" * 80)
 
-    # Pass entire config dictionary or ensure model_params contains mesh settings
-    cfg_model = cfg.get("model_params", {})
-    cfg_model["num_nodes"] = cfg.get("mesh", {}).get("num_nodes", 40962)
-    cfg_model["num_levels"] = cfg.get("mesh", {}).get("num_levels", 32)
+    lit_module = StandardGraphCastLitModule(cfg=cfg)
 
-    lit_module = StandardGraphCastLitModule(cfg=cfg_model)
-
-    logger = CSVLogger("lightning_logs", name="standard_direct")
+    logger = CSVLogger("lightning_logs", name="standard_direct_m6")
     checkpoint_callback = ModelCheckpoint(
         dirpath="checkpoints",
-        filename="graphcast_standard_{epoch:02d}_{val_loss:.4f}",
+        filename="graphcast_m6_{epoch:02d}_{val_loss:.4f}",
         save_top_k=3,
         monitor="val_loss",
         mode="min",
@@ -157,7 +129,7 @@ def main():
         log_every_n_steps=10,
     )
 
-    zarr_path = cfg.get("paths", {}).get("zarr_store", "/scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data/gfs_icosahedral_m4.zarr")
+    zarr_path = cfg.get("paths", {}).get("zarr_store", "data/gfs_icosahedral_m6.zarr")
     print(f"Loading Zarr training store: {zarr_path}")
 
     dataset = IcosahedralZarrDataset(zarr_path=zarr_path, history_steps=cfg.get("model_params", {}).get("history_steps", 2))
@@ -167,12 +139,12 @@ def main():
     train_ds, val_ds = torch.utils.data.random_split(dataset, [train_size, val_size])
 
     num_workers = train_params.get("num_workers", 4)
-    batch_size = train_params.get("batch_size", 4)
+    batch_size = train_params.get("batch_size", 1)  # Set to 1 for M6 memory safety
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
-    print(f"Starting standard direct training across {len(train_ds)} train samples and {len(val_ds)} val samples...")
+    print(f"Starting M6 training across {len(train_ds)} train samples and {len(val_ds)} val samples...")
     trainer.fit(lit_module, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
 

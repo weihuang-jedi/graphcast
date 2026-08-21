@@ -4,3 +4,4 @@ checkpoints
 lightning_logs
 output
 output_reconstructed
+saved_checkpoints

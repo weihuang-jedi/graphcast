@@ -21,7 +21,7 @@ model_params:
   in_channels: 15
   out_channels: 6
   history_steps: 2
-  rollout_steps: 6
+  rollout_steps: 2
   latent_dim: 256
   processor_layers: 16
   learning_rate: 1.0e-04
@@ -38,6 +38,6 @@ loss_weights:
   weight_P: 1.0
   weight_Q: 1.0
   weight_T: 1.0
-  weight_U: 2.5            # Kinetic energy loss weighting
-  weight_V: 2.5
+  weight_U: 5.0            # Kinetic energy loss weighting
+  weight_V: 5.0
   weight_W: 1.0

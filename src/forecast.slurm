@@ -58,6 +58,6 @@ python utils/plot_forecast_vs_truth.py \
     --level_idx 10 \
     --truth_dir ${griddir} \
     --init_time 2026020100 \
-    --lead_times 48 96 144 192 240 \
+    --lead_times 24 48 72 96 120 \
     --out_dir verification_plots \
-    --vars t p u v q --show
+    --vars t p u v q

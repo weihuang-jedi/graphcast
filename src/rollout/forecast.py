@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Standard Direct AI Weather Forecast Rollout Driver for M6 Terrain-Following Grid.
-Prevents np.exp() overflows with robust log-state boundary clipping and array sanitization.
+Includes Rollout Step Inflation for Kinetic Wind Energy Recovery (U, V, W).
 """
 
 import os
@@ -18,26 +18,25 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="M6 Terrain-Following Forecast Rollout")
-    parser.add_argument("-c", "--ckpt_path", type=str, required=True, help="Path to checkpoint (.ckpt)")
-    parser.add_argument("-i", "--input_file", type=str, default=None, help="Input NetCDF (if multi-step)")
-    parser.add_argument("--input_file_t0", type=str, default=None, help="Input NetCDF for time t0 (e.g., t06z)")
-    parser.add_argument("--input_file_tm1", type=str, default=None, help="Input NetCDF for time t-1 (e.g., t00z / t-6h)")
-    parser.add_argument("--init_time", type=str, default="2026020106", help="Forecast init time YYYYMMDDHH")
+    parser = argparse.ArgumentParser(description="M6 Forecast Rollout with Wind Inflation")
+    parser.add_argument("-c", "--ckpt_path", type=str, required=True)
+    parser.add_argument("-i", "--input_file", type=str, default=None)
+    parser.add_argument("--input_file_t0", type=str, default=None)
+    parser.add_argument("--input_file_tm1", type=str, default=None)
+    parser.add_argument("--init_time", type=str, default="2026020106")
     parser.add_argument("-s", "--forecast_steps", type=int, default=100)
-    parser.add_argument("--step_hours", type=int, default=6, help="Step time in hours (default: 6h)")
+    parser.add_argument("--step_hours", type=int, default=6)
     parser.add_argument("--output_dir", type=str, default="output")
     parser.add_argument("--grid_ref", type=str, default="../data/terrain-regular-grid/gfs.20260101.t00z.0p25.f000.nc")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Wind momentum recovery scaling parameters
+    parser.add_argument("--alpha_wind", type=float, default=2.1, help="Momentum inflation factor for U and V winds")
+    parser.add_argument("--alpha_w", type=float, default=2.5, help="Inflation factor for vertical velocity W")
     return parser.parse_args()
 
 
 def extract_var_from_ds(ds, v_name):
-    """
-    Extracts variable array from NetCDF, safely maintaining log-state boundaries:
-    - ln_P: ~11.52 ln(Pa) -> Pa range ~100,000
-    - ln_T: ~5.63 ln(K) -> K range ~280
-    """
     var_key = None
     possible_keys = [
         f"ln_{v_name}_icosahedral", f"{v_name}_icosahedral",
@@ -53,34 +52,11 @@ def extract_var_from_ds(ds, v_name):
 
     vals = np.asarray(ds[var_key].values, dtype=np.float32)
 
-    # Convert linear physical variables to log-state if dataset stores linear space
     if not var_key.startswith("ln_"):
-        if v_name.lower() == "t" and np.mean(vals) > 100.0:
-            vals = np.log(np.maximum(vals, 1e-6))
-        elif v_name.lower() == "p" and np.mean(vals) > 100.0:
+        if v_name.lower() in ["t", "p"] and np.mean(vals) > 100.0:
             vals = np.log(np.maximum(vals, 1e-6))
 
     return vals
-
-
-def safe_unlog(arr, min_val, max_val, default_physical_mean):
-    """
-    Safely converts log-state array e^x to physical units with hard clipping bounds.
-    Prevents floating point overflows (exp(x > 700) -> Inf/NaN).
-    """
-    if np.isnan(arr).any():
-        arr = np.nan_to_num(arr, nan=np.log(default_physical_mean))
-
-    # If already in physical range (e.g. T ~ 280), return directly
-    mean_val = np.mean(arr)
-    if mean_val > min_val and mean_val < max_val:
-        return np.clip(arr, min_val, max_val)
-
-    # Clip log-space values to prevent exp() overflow (max log(Pa) ~ 12.0, max log(K) ~ 6.0)
-    arr_clipped = np.clip(arr, a_min=-20.0, a_max=15.0)
-    arr_phys = np.exp(arr_clipped)
-
-    return np.clip(arr_phys, min_val, max_val)
 
 
 @torch.no_grad()
@@ -88,9 +64,7 @@ def run_rollout():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device(args.device)
-    logging.info(f"Executing M6 Terrain-Following Forecast Rollout on [{device}]")
 
-    # 1. Load Checkpoint & Model
     checkpoint = torch.load(args.ckpt_path, map_location="cpu", weights_only=False)
     state_dict = checkpoint.get("state_dict", checkpoint)
     hparams = checkpoint.get("hyper_parameters", {})
@@ -103,21 +77,17 @@ def run_rollout():
 
     start_dt = datetime.strptime(args.init_time, "%Y%m%d%H")
 
-    # 2. Open Initial Condition Datasets
     if args.input_file_t0 and args.input_file_tm1:
-        logging.info(f"Loading separate initial condition files: t0={args.input_file_t0} | t-1={args.input_file_tm1}")
         ds_t0 = xr.open_dataset(args.input_file_t0)
         ds_tm1 = xr.open_dataset(args.input_file_tm1)
         ds_meta = ds_t0
     elif args.input_file:
-        logging.info(f"Loading multi-step initial condition file: {args.input_file}")
         ds_t0 = xr.open_dataset(args.input_file)
         ds_tm1 = ds_t0
         ds_meta = ds_t0
     else:
-        raise ValueError("Must provide either --input_file OR both --input_file_t0 and --input_file_tm1")
+        raise ValueError("Must provide --input_file or both --input_file_t0 and --input_file_tm1")
 
-    # 3. Extract Grid Metadata & Static Terrain Topology
     lats_deg = ds_meta['latitude'].values if 'latitude' in ds_meta else ds_meta['lat'].values
     lons_deg = ds_meta['longitude'].values if 'longitude' in ds_meta else ds_meta['lon'].values
     num_nodes = len(lats_deg)
@@ -132,7 +102,6 @@ def run_rollout():
     eta = ds_meta['eta'].values if 'eta' in ds_meta else np.linspace(1.0, 0.0, num_levels, dtype=np.float32)
     target_level = ds_meta['target_level'].values if 'target_level' in ds_meta else np.arange(num_levels, dtype=np.float32)
 
-    # 4. Extract Dynamic States for t-1 and t0 in Nodes-First Layout: (nodes, levels)
     def load_nodes_first_state(v_name):
         val_t0 = extract_var_from_ds(ds_t0, v_name)
         val_tm1 = extract_var_from_ds(ds_tm1, v_name)
@@ -162,9 +131,15 @@ def run_rollout():
 
     history_state = torch.cat([state_tm1, state_t0], dim=-1)
 
-    logging.info(f"[M6 ROLLOUT] Nodes: {num_nodes} | Levels: {num_levels} | Step Hours: {args.step_hours}h")
+    # Inflation vector: [ln_P=1.0, Q=1.0, ln_T=1.0, U=2.1, V=2.1, W=2.5]
+    step_inflation = torch.tensor(
+        [1.0, 1.0, 1.0, args.alpha_wind, args.alpha_wind, args.alpha_w],
+        dtype=torch.float32,
+        device=device
+    ).view(1, 1, 6)
 
-    # 5. Autoregressive Forecast Rollout Loop
+    logging.info(f"[M6 ROLLOUT] Wind Inflation Multiplier: U,V x{args.alpha_wind:.1f} | W x{args.alpha_w:.1f}")
+
     for step in range(1, args.forecast_steps + 1):
         lead_hours = step * args.step_hours
         current_dt = start_dt + timedelta(hours=lead_hours)
@@ -173,26 +148,26 @@ def run_rollout():
 
         pred_delta = lit_module(history_state, timestamps_t)
 
-        # Dampen prediction delta per step to enforce numerical stability
-        current_state = history_state[:, :, -6:] + 0.10 * pred_delta
+        # Apply Step Inflation to wind increments (U, V, W) while keeping T, P, Q unscaled
+        inflated_delta = pred_delta * step_inflation
+        current_state = history_state[:, :, -6:] + inflated_delta
 
-        # Bound log-state buffers in history tensor
-        current_state[:, :, 0] = torch.clamp(current_state[:, :, 0], min=5.0, max=13.0)   # ln(P): 148 Pa to 442,413 Pa
-        current_state[:, :, 1] = torch.clamp(current_state[:, :, 1], min=0.0, max=0.035)  # Q: 0 to 0.035 kg/kg
-        current_state[:, :, 2] = torch.clamp(current_state[:, :, 2], min=4.5, max=6.0)    # ln(T): 90 K to 403 K
-        current_state[:, :, 3] = torch.clamp(current_state[:, :, 3], min=-120.0, max=120.0) # U wind
-        current_state[:, :, 4] = torch.clamp(current_state[:, :, 4], min=-120.0, max=120.0) # V wind
+        # Log-state bounds
+        current_state[:, :, 0] = torch.clamp(current_state[:, :, 0], min=5.0, max=12.5)   # ln(P)
+        current_state[:, :, 1] = torch.clamp(current_state[:, :, 1], min=0.0, max=0.035)  # Q
+        current_state[:, :, 2] = torch.clamp(current_state[:, :, 2], min=5.1, max=5.8)    # ln(T)
+        current_state[:, :, 3] = torch.clamp(current_state[:, :, 3], min=-120.0, max=120.0)
+        current_state[:, :, 4] = torch.clamp(current_state[:, :, 4], min=-120.0, max=120.0)
 
         history_state = torch.cat([history_state[:, :, 6:], current_state], dim=-1)
 
-        # Reshape Nodes-First (40962, 32, 6) -> Transpose to NetCDF (32, 40962, 6)
         state_nodes_first = current_state.view(num_nodes, num_levels, 6).cpu().numpy()
         state_np = np.transpose(state_nodes_first, (1, 0, 2))
 
-        # Safely convert log-state variables back to physical units for exported NetCDF files
-        p_out = safe_unlog(state_np[..., 0], min_val=100.0, max_val=110000.0, default_physical_mean=95000.0)
+        # Convert log-state variables back to physical units for exported NetCDF
+        p_out = np.exp(state_np[..., 0])  # ln(Pa) -> Pa
         q_out = np.clip(state_np[..., 1], a_min=0.0, a_max=0.035)
-        t_out = safe_unlog(state_np[..., 2], min_val=150.0, max_val=340.0, default_physical_mean=263.0)
+        t_out = np.exp(state_np[..., 2])  # ln(K) -> K
         u_out = np.clip(state_np[..., 3], a_min=-120.0, a_max=120.0)
         v_out = np.clip(state_np[..., 4], a_min=-120.0, a_max=120.0)
         w_out = np.clip(state_np[..., 5], a_min=-10.0, a_max=10.0)
@@ -222,7 +197,6 @@ def run_rollout():
                 "title": f"Direct GraphCast AI Weather Forecast (f{lead_hours:04d}h)",
                 "init_time": start_dt.strftime("%Y-%m-%d %H:%M:%S UTC"),
                 "valid_time": current_dt.strftime("%Y-%m-%d %H:%M:%S UTC"),
-                "source": "M6 Terrain-Following GraphCast Model",
             },
         )
 
@@ -234,7 +208,6 @@ def run_rollout():
             logging.info(
                 f"Step {step}/{args.forecast_steps} (f{lead_hours:04d}h - {current_dt.strftime('%b %d %H:%MZ')}) | "
                 f"T: [{t_out.min():.2f}, {t_out.max():.2f}] K | "
-                f"P: [{p_out.min():.1f}, {p_out.max():.1f}] Pa | "
                 f"U: [{u_out.min():.2f}, {u_out.max():.2f}] m/s | "
                 f"V: [{v_out.min():.2f}, {v_out.max():.2f}] m/s | "
                 f"Q: [{q_out.min():.6f}, {q_out.max():.6f}] kg/kg"
