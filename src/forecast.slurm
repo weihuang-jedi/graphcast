@@ -20,6 +20,11 @@ if [ -z "$CONDA_PREFIX" ]; then
    mamba activate anemoi
 fi
 
+svwdir=/scratch5/purged/Wei.Huang/src/starviewerweathermodel
+datadir=${svwdir}/data
+griddir=${datadir}/terrain-regular-grid
+truthdir=${datadir}/icosahedral-truth
+
 cd /scratch5/purged/Wei.Huang/src/graphcast/src
 
 # 1. Clean existing checkpoints and output caches
@@ -29,28 +34,30 @@ rm -rf output/*.nc output_reconstructed/*.nc
 # sbatch training.slurm
 
 # 3. After training completes, run standard direct rollout
+# Example Rollout using separate t0 (06Z) and t-1 (00Z) single-step NetCDF files
 PYTHONPATH=. python rollout/forecast.py \
     -c checkpoints/last.ckpt \
-    -i /scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data/init_icosahedral_m4.20260201.t00z.1p00.f000.nc \
-    --init_time 2026020100 \
-    -s 100 \
-    --step_hours 24 \
+    --input_file_t0 ${truthdir}/icosahedral_logstate_m6.20260201.t06z.0p25.f000.nc \
+    --input_file_tm1 ${truthdir}/icosahedral_logstate_m6.20260201.t00z.0p25.f000.nc \
+    --init_time 2026020106 \
+    -s 20 \
+    --step_hours 6 \
     --output_dir output \
     --device cpu
 
 # 4. Cartesian 3D Spherical Regridder
 PYTHONPATH=. python utils/reconstruct_forecast_latlon.py \
     --fcst_dir output \
-    --truth_ref /scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data/nc_truth/gfs.20260201.t06z.1p00.f000.nc \
-    --grid_ref /scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data/starviewergraphcast-grid/global_icosahedral_m4.20220101.t00z.1p00.f000.nc \
+    --grid_ref ${truthdir}/icosahedral_logstate_m6.20260201.t06z.0p25.f000.nc \
+    --truth_ref ${griddir}/gfs.20260201.t06z.0p25.f000.nc \
     --out_dir output_reconstructed
 
 # 5. Verify Metrics and Display Diagnostic Maps
 python utils/plot_forecast_vs_truth.py \
     --fcst_dir output_reconstructed \
     --level_idx 10 \
-    --truth_dir /scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data/nc_truth \
+    --truth_dir ${griddir} \
     --init_time 2026020100 \
-    --lead_times 480 960 1440 1920 2400 \
+    --lead_times 48 96 144 192 240 \
     --out_dir verification_plots \
     --vars t p u v q --show

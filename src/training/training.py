@@ -128,7 +128,12 @@ def main():
     print(" INITIALIZING STANDARD DIRECT AI WEATHER TRAINING RUN (NODES-FIRST LAYOUT)")
     print("=" * 80)
 
-    lit_module = StandardGraphCastLitModule(cfg=cfg)
+    # Pass entire config dictionary or ensure model_params contains mesh settings
+    cfg_model = cfg.get("model_params", {})
+    cfg_model["num_nodes"] = cfg.get("mesh", {}).get("num_nodes", 40962)
+    cfg_model["num_levels"] = cfg.get("mesh", {}).get("num_levels", 32)
+
+    lit_module = StandardGraphCastLitModule(cfg=cfg_model)
 
     logger = CSVLogger("lightning_logs", name="standard_direct")
     checkpoint_callback = ModelCheckpoint(

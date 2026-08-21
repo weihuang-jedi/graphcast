@@ -15,9 +15,9 @@ class DeepGraphCastModel(nn.Module):
         in_channels: int = 12,
         out_channels: int = 6,
         num_levels: int = 32,
-        num_nodes: int = 2562,
+        num_nodes: int = 40962,
         hidden_dim: int = 128,
-        stage: str = "M3",
+        stage: str = "M6",
         climatology_file: str = "/scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data/climatology_m0_m1_m2_diurnal.nc",
         **kwargs,
     ):
@@ -69,7 +69,13 @@ class DeepGraphCastModel(nn.Module):
         pred_delta = self.decoder(h)
 
         # 2. Reshape predictions to (batch, levels, nodes, vars)
-        m_reshaped = pred_delta.view(b_size, self.num_levels, self.num_nodes, self.num_vars)
+        # m_reshaped = pred_delta.view(b_size, self.num_levels, self.num_nodes, self.num_vars)
+
+        # NEW: Dynamically infer spatial node dimension (-1) from total elements:
+        if pred_delta.dim() == 2:
+            m_reshaped = pred_delta.view(b_size, -1)
+        else:
+            m_reshaped = pred_delta.reshape(b_size, self.num_levels, -1, self.num_vars)
 
         x_dict = {
             "P": m_reshaped[:, :, :, 0],
@@ -100,4 +106,15 @@ class DeepGraphCastModel(nn.Module):
             [x_dict["P"], x_dict["Q"], x_dict["T"], x_dict["U"], x_dict["V"], x_dict["W"]],
             dim=-1,
         )
-        return out_constrained.view(b_size, self.num_levels * self.num_nodes, self.num_vars)
+
+        # Inside DeepGraphCastModel.forward() in models/graphcast.py (around line 109)
+
+        # REPLACE:
+        # return out_constrained.view(b_size, self.num_levels * self.num_nodes, self.num_vars)
+
+        # WITH DYNAMIC RESHAPE:
+        num_vars = getattr(self, "num_vars", 6)
+        if out_constrained.dim() == 2:
+            return out_constrained.reshape(b_size, -1, num_vars)
+        else:
+            return out_constrained.reshape(b_size, -1, num_vars)

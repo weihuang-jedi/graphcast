@@ -36,12 +36,16 @@ class StandardGraphCastLitModule(pl.LightningModule):
         self.cfg = cfg
 
         self.num_levels = cfg.get("num_levels", 32)
-        self.num_nodes = cfg.get("num_nodes", 40962)  # Default for M6 grid (2562 for M4)
+        self.num_nodes = cfg.get("num_nodes", 40962)  # Default for M6 grid
 
         # Empirical Dataset Means (mu) and Standard Deviations (sigma)
         # Order: [P (hPa), Q (kg/kg), T (K), U (m/s), V (m/s), W (m/s)]
-        mu_vals = cfg.get("mu_vals", [950.0, 0.0047, 263.0, 0.0, 0.0, 0.0])
-        sigma_vals = cfg.get("sigma_vals", [50.0, 0.0045, 25.0, 12.0, 12.0, 0.1])
+        # mu_vals = cfg.get("mu_vals", [950.0, 0.0047, 263.0, 0.0, 0.0, 0.0])
+        # sigma_vals = cfg.get("sigma_vals", [50.0, 0.0045, 25.0, 12.0, 12.0, 0.1])
+        # For log-state inputs (ln_p, q, ln_t, u, v, w):
+        # ln_P: ~11.5 ln(Pa), Q: ~0.0047, ln_T: ~5.57 ln(K), U: 0.0, V: 0.0, W: 0.0
+        mu_vals = cfg.get("mu_vals", [11.5, 0.0047, 5.57, 0.0, 0.0, 0.0])
+        sigma_vals = cfg.get("sigma_vals", [0.15, 0.0045, 0.12, 12.0, 12.0, 0.1])
 
         self.register_buffer("mu", torch.tensor(mu_vals, dtype=torch.float32).view(1, 1, 6))
         self.register_buffer("sigma", torch.tensor(sigma_vals, dtype=torch.float32).view(1, 1, 6))
@@ -82,123 +86,44 @@ class StandardGraphCastLitModule(pl.LightningModule):
         # Static features cache
         self.register_buffer("static_features", None)
 
-    def _get_static_surface_features(self, device: torch.device) -> torch.Tensor:
-        """
-        Constructs static node features in strict Nodes-First layout:
-        Output shape: (num_nodes * num_levels, feature_count)
-        Features included:
-        - land_sea_mask (0=Ocean, 1=Land)
-        - elevation (normalized in km)
-        - 3D vertical terrain-following coordinate (normalized layer height)
-        """
-        if self.static_features is None:
-            grid_path = self.cfg.get(
-                "grid_ref",
-                "../data/starviewergraphcast-grid/global_icosahedral_m6.20220101.t00z.1p00.f000.nc",
-            )
-
-            if os.path.exists(grid_path):
-                ds_grid = xr.open_dataset(grid_path)
-                lsm = ds_grid["land_sea_mask"].values if "land_sea_mask" in ds_grid else np.zeros((self.num_nodes,))
-                elev = ds_grid["elevation"].values if "elevation" in ds_grid else np.zeros((self.num_nodes,))
-                ds_grid.close()
-            else:
-                lsm = np.zeros((self.num_nodes,), dtype=np.float32)
-                elev = np.zeros((self.num_nodes,), dtype=np.float32)
-
-            # 1. Surface Land-Sea Mask: (nodes, levels, 1)
-            lsm_nodes_first = (
-                torch.tensor(lsm, dtype=torch.float32)
-                .unsqueeze(-1)
-                .repeat(1, self.num_levels)
-                .unsqueeze(-1)
-            )
-
-            # 2. Surface Elevation (km): (nodes, levels, 1)
-            elev_nodes_first = (
-                torch.tensor(elev / 1000.0, dtype=torch.float32)
-                .unsqueeze(-1)
-                .repeat(1, self.num_levels)
-                .unsqueeze(-1)
-            )
-
-            feat_list = [lsm_nodes_first, elev_nodes_first]
-
-            # 3. Append 3D terrain vertical coordinate if expecting 15 channels
-            if self.in_channels >= 15:
-                # Hybrid coordinate vertical decay profile: b(k) = exp(-k / 10.0)
-                lev_idx = torch.arange(self.num_levels, dtype=torch.float32).unsqueeze(0)  # (1, levels)
-                terrain_decay = torch.exp(-lev_idx / 10.0).unsqueeze(-1)  # (1, levels, 1)
-                
-                # Z_3d(node, lev) = Z_flat(lev) + decay(lev) * elev(node)
-                z_flat = (lev_idx * 0.8).unsqueeze(-1).repeat(self.num_nodes, 1, 1)  # Nominal flat height in km
-                z_terrain_3d = z_flat + (elev_nodes_first * terrain_decay)  # (nodes, levels, 1)
-                feat_list.append(z_terrain_3d)
-
-            static_cat = torch.cat(feat_list, dim=-1)  # (nodes, levels, C_static)
-            self.static_features = static_cat.view(self.num_nodes * self.num_levels, -1).to(device)
-
-        return self.static_features
-
     def forward(self, x_raw: torch.Tensor, timestamps: torch.Tensor) -> torch.Tensor:
         """
         x_raw: (B, N_flat, 12) raw un-normalized physical history (t-1, t0)
         timestamps: (B,) Unix epoch timestamps
         Returns predicted state increment delta_X in physical units: (B, N_flat, 6)
         """
-        # Replace rigid reshape with dynamic batch/node/level scaling:
-        num_nodes = getattr(self, "num_nodes", self.cfg.get("mesh", {}).get("num_nodes", 40962))
-        num_levels = getattr(self, "num_levels", self.cfg.get("mesh", {}).get("num_levels", 32))
+        batch_size, n_flat, num_vars = x_raw.shape
 
-        batch_size, num_flat, num_vars = x_raw.shape
-
-        # Normalize t-1 and t0 history steps separately
+        # 1. Normalize t-1 and t0 history steps separately
         x_t0 = (x_raw[:, :, :6] - self.mu) / self.sigma
         x_t1 = (x_raw[:, :, 6:12] - self.mu) / self.sigma
-        x_norm = torch.cat([x_t0, x_t1], dim=-1)
+        x_norm = torch.cat([x_t0, x_t1], dim=-1)  # (B, N_flat, 12)
 
-        # Extract total spatial flatten dimension dynamically from x_norm
-        batch_size, n_flat, in_channels = x_norm.shape  # n_flat should be 1,310,784 for M6
-
-        # 1. Extract or construct static_flat FIRST
+        # 2. Extract or construct static features
+        num_static = self.in_channels - 12 if self.in_channels > 12 else 3
         if hasattr(self, "static_features") and self.static_features is not None:
             static_flat = self.static_features.to(x_norm.device)
             if static_flat.dim() == 2:
                 static_flat = static_flat.unsqueeze(0).expand(batch_size, -1, -1)
         else:
-            # Construct zero static placeholder if not supplied
-            # Default feature dimension (e.g., 2 for elevation + land-sea mask)
-            num_static = self.cfg.get("model_params", {}).get("num_static_feats", 2)
             static_flat = torch.zeros((batch_size, n_flat, num_static), device=x_norm.device, dtype=x_norm.dtype)
 
-        # 2. NOW check and align static_flat dimension if needed
+        # 3. Align static feature dimensions if needed
         if static_flat.shape[1] != n_flat:
-            # If static_flat is per-node [B, 40962, C], expand across 32 levels -> [B, 1310784, C]
-            num_levels = getattr(self, "num_levels", self.cfg.get("mesh", {}).get("num_levels", 32))
-            if static_flat.shape[1] * num_levels == n_flat:
-                num_static_cols = static_flat.shape[-1]
-                static_flat = static_flat.unsqueeze(2).expand(-1, -1, num_levels, -1).reshape(batch_size, n_flat, num_static_cols)
+            if static_flat.shape[1] * self.num_levels == n_flat:
+                num_cols = static_flat.shape[-1]
+                static_flat = static_flat.unsqueeze(2).expand(-1, -1, self.num_levels, -1).reshape(batch_size, n_flat, num_cols)
             else:
-                # Fallback reset if node shape cannot align
-                num_static_cols = static_flat.shape[-1]
-                static_flat = torch.zeros((batch_size, n_flat, num_static_cols), device=x_norm.device, dtype=x_norm.dtype)
+                static_flat = torch.zeros((batch_size, n_flat, num_static), device=x_norm.device, dtype=x_norm.dtype)
 
-        # Append static surface & 3D terrain features
-        # static_feat = self._get_static_surface_features(x_raw.device)
-        # static_flat = static_feat.unsqueeze(0).repeat(batch_size, 1, 1)
+        # 4. Concatenate history and static features for GNN input
         x_input = torch.cat([x_norm, static_flat], dim=-1)  # (B, N_flat, in_channels)
 
-        # Model forward pass predicts normalized increment
-        # pred_delta_norm = self.model(x_input, None, timestamps)
-        # Un-normalize delta back to physical units
-        # pred_delta = pred_delta_norm * self.sigma
+        # 5. Forward pass through underlying DeepGraphCastModel
+        pred_delta_norm = self.model(x_input, None, timestamps)
 
-        pred_delta = self.forward(x_raw, timestamps)
-
-        if pred_delta.dim() == 2:
-            pred_delta = pred_delta.reshape(batch_size, -1, 6)
-        else:
-            pred_delta = pred_delta.reshape(batch_size, num_nodes, num_levels, 6)
+        # 6. Un-normalize delta back to physical units
+        pred_delta = pred_delta_norm * self.sigma
 
         return pred_delta
 
@@ -215,27 +140,20 @@ class StandardGraphCastLitModule(pl.LightningModule):
         x_raw, y_target_full, timestamps = batch
         batch_size = y_target_full.shape[0]
 
-        # Instead of hardcoding self.num_nodes and self.num_levels:
-        # Extract dynamic node count from input or config
-        num_nodes = getattr(self, "num_nodes", self.cfg.get("mesh", {}).get("num_nodes", 40962))
-        num_levels = getattr(self, "num_levels", self.cfg.get("mesh", {}).get("num_levels", 32))
-
-        # Reshape target dynamically based on input batch tensor shape:
+        # Reshape target dynamically based on input batch tensor shape
         if y_target_full.dim() == 2:
-            # y_target_full is [Batch * Total_Nodes, 6] or similar
             y_target_full = y_target_full.view(batch_size, -1, 6)
-        else:
-            # Use -1 to let PyTorch infer spatial/level dimension dynamically without failing
-            y_target_full = y_target_full.reshape(batch_size, -1, num_levels, 6)
 
-        # Ensure Nodes-First 4D layout: (B, num_nodes, num_levels, 6)
-        # if y_target_full.ndim == 3:
-        #     y_target_full = y_target_full.view(batch_size, self.num_nodes, self.num_levels, 6)
+        # Ensure y_target_full is 4D: (B, N_nodes, N_levels, 6)
+        if y_target_full.dim() == 3:
+            y_target_full = y_target_full.view(batch_size, -1, self.num_levels, 6)
 
         # Predict increment in physical units
-        # pred_delta = self.forward(x_raw, timestamps).view(batch_size, self.num_nodes, self.num_levels, 6)
-        pred_delta = self.forward(x_raw, timestamps).reshape(batch_size, -1, 6)
-        x_latest = x_raw[:, :, 6:12].view(batch_size, self.num_nodes, self.num_levels, 6)
+        pred_delta_flat = self.forward(x_raw, timestamps)  # (B, N_flat, 6)
+        pred_delta = pred_delta_flat.view(batch_size, -1, self.num_levels, 6)
+
+        # Unflatten t0 latest physical state
+        x_latest = x_raw[:, :, 6:12].view(batch_size, -1, self.num_levels, 6)
 
         # Full predicted physical state
         pred_full = x_latest + pred_delta
@@ -249,7 +167,6 @@ class StandardGraphCastLitModule(pl.LightningModule):
 
         # Optional layer mass-weighting for terrain-following coordinates
         if dp_mass_weight is not None:
-            # dp_mass_weight shape: (B, nodes, levels, 1)
             norm_dp = dp_mass_weight / torch.mean(dp_mass_weight)
             sq_error = sq_error * norm_dp
 

@@ -18,6 +18,8 @@ model_params:
   hierarchy_levels: [6, 5, 4, 3, 2, 1, 0]
   num_nodes: 40962
   num_levels: 32
+  in_channels: 15
+  out_channels: 6
   history_steps: 2
   rollout_steps: 6
   latent_dim: 256
