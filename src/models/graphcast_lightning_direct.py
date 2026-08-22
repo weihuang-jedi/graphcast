@@ -1,4 +1,10 @@
-# models/graphcast_lightning_direct.py
+#!/usr/bin/env python3
+"""
+Standard Direct AI Weather Forecasting PyTorch Lightning Module.
+Trains end-to-end on Log-State physical targets X_full (ln_P, Q, ln_T, U, V, W).
+Includes multi-step autoregressive rollout unrolling during training loss calculation.
+"""
+
 import os
 import numpy as np
 import xarray as xr
@@ -17,26 +23,23 @@ class StandardGraphCastLitModule(pl.LightningModule):
         self.cfg = cfg
 
         self.num_levels = cfg.get("num_levels", 32)
-        self.num_nodes = cfg.get("num_nodes", 40962)  # M6 grid
+        self.num_nodes = cfg.get("num_nodes", 40962)  # M6 grid default
 
-        # Log-state standardization constants [ln_P, Q, ln_T, U, V, W]
-        # mu_vals = cfg.get("mu_vals", [11.52, 0.0047, 5.57, 0.0, 0.0, 0.0])
-        # sigma_vals = cfg.get("sigma_vals", [0.25, 0.0045, 0.15, 12.0, 12.0, 0.1])
-
-        # Order: [ln_P, Q, ln_T, U, V, W]
-        # Reduced sigma_U and sigma_V from 12.0 to 6.0 to amplify backpropagated wind gradients
+        # Log-State Standardization [ln_P, Q, ln_T, U, V, W]
         mu_vals = cfg.get("mu_vals", [11.52, 0.0047, 5.57, 0.0, 0.0, 0.0])
         sigma_vals = cfg.get("sigma_vals", [0.15, 0.0045, 0.10, 5.0, 5.0, 0.1])
 
         self.register_buffer("mu", torch.tensor(mu_vals, dtype=torch.float32).view(1, 1, 6))
         self.register_buffer("sigma", torch.tensor(sigma_vals, dtype=torch.float32).view(1, 1, 6))
 
-        self.in_channels = cfg.get("in_channels", 15)  # 12 dynamic + 2 surface + 1 3D terrain
+        # Model Architecture
+        self.in_channels = cfg.get("in_channels", 15)
         self.out_channels = cfg.get("out_channels", 6)
         self.latent_dim = cfg.get("latent_dim", 256)
         self.processor_layers = cfg.get("processor_layers", 16)
         self.hierarchy_levels = cfg.get("hierarchy_levels", [6, 5, 4, 3, 2, 1, 0])
         self.history_steps = cfg.get("history_steps", 2)
+        self.rollout_steps = cfg.get("rollout_steps", 2)
 
         self.model = DeepGraphCastModel(
             in_channels=self.in_channels,
@@ -48,28 +51,27 @@ class StandardGraphCastLitModule(pl.LightningModule):
         )
 
         self.learning_rate = cfg.get("learning_rate", 1.0e-04)
-        self.loss_weights_dict = cfg.get("loss_weights", {})
-
-        w_p = self.loss_weights_dict.get("weight_P", 1.0)
-        w_q = self.loss_weights_dict.get("weight_Q", 1.0)
-        w_t = self.loss_weights_dict.get("weight_T", 1.0)
-        w_u = self.loss_weights_dict.get("weight_U", 2.5)
-        w_v = self.loss_weights_dict.get("weight_V", 2.5)
-        w_w = self.loss_weights_dict.get("weight_W", 1.0)
+        
+        # Resolve loss weights safely across root or nested dict
+        loss_cfg = cfg.get("loss_weights", {})
+        w_p = loss_cfg.get("weight_P", 2.0)
+        w_q = loss_cfg.get("weight_Q", 1.0)
+        w_t = loss_cfg.get("weight_T", 1.0)
+        w_u = loss_cfg.get("weight_U", 5.0)  # 5x wind momentum penalty
+        w_v = loss_cfg.get("weight_V", 5.0)  # 5x wind momentum penalty
+        w_w = loss_cfg.get("weight_W", 1.0)
 
         self.register_buffer(
             "loss_weights",
             torch.tensor([w_p, w_q, w_t, w_u, w_v, w_w], dtype=torch.float32).view(1, 1, 1, 6),
         )
 
+        self.lambda_moisture = loss_cfg.get("lambda_moisture", cfg.get("lambda_moisture", 10.0))
         self.register_buffer("static_features", None)
 
     def _get_static_surface_features(self, device: torch.device) -> torch.Tensor:
         if self.static_features is None:
-            grid_path = self.cfg.get(
-                "grid_ref",
-                "../data/starviewergraphcast-grid/global_icosahedral_m6.20220101.t00z.1p00.f000.nc",
-            )
+            grid_path = self.cfg.get("grid_ref", "")
 
             if os.path.exists(grid_path):
                 ds_grid = xr.open_dataset(grid_path)
@@ -80,19 +82,8 @@ class StandardGraphCastLitModule(pl.LightningModule):
                 lsm = np.zeros((self.num_nodes,), dtype=np.float32)
                 elev = np.zeros((self.num_nodes,), dtype=np.float32)
 
-            lsm_nodes_first = (
-                torch.tensor(lsm, dtype=torch.float32)
-                .unsqueeze(-1)
-                .repeat(1, self.num_levels)
-                .unsqueeze(-1)
-            )
-
-            elev_nodes_first = (
-                torch.tensor(elev / 1000.0, dtype=torch.float32)
-                .unsqueeze(-1)
-                .repeat(1, self.num_levels)
-                .unsqueeze(-1)
-            )
+            lsm_nodes_first = torch.tensor(lsm, dtype=torch.float32).unsqueeze(-1).repeat(1, self.num_levels).unsqueeze(-1)
+            elev_nodes_first = torch.tensor(elev / 1000.0, dtype=torch.float32).unsqueeze(-1).repeat(1, self.num_levels).unsqueeze(-1)
 
             feat_list = [lsm_nodes_first, elev_nodes_first]
 
@@ -124,23 +115,45 @@ class StandardGraphCastLitModule(pl.LightningModule):
         return pred_delta
 
     def _compute_loss(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor], stage_name: str) -> torch.Tensor:
-        x_raw, y_target_full, timestamps = batch
-        batch_size = y_target_full.shape[0]
+        x_raw, y_target_seq, timestamps = batch
+        batch_size = x_raw.shape[0]
 
-        if y_target_full.ndim == 3:
-            y_target_full = y_target_full.view(batch_size, self.num_nodes, self.num_levels, 6)
+        # y_target_seq shape: (B, rollout_steps, num_nodes * num_levels, 6)
+        if y_target_seq.ndim == 3:
+            y_target_seq = y_target_seq.unsqueeze(1)
 
-        pred_delta = self.forward(x_raw, timestamps).view(batch_size, self.num_nodes, self.num_levels, 6)
-        x_latest = x_raw[:, :, 6:12].view(batch_size, self.num_nodes, self.num_levels, 6)
+        current_history = x_raw.clone()
+        total_unrolled_loss = 0.0
 
-        pred_full = x_latest + pred_delta
+        # Multi-Step Autoregressive Unrolling during backprop
+        for k in range(self.rollout_steps):
+            step_ts = timestamps + (k * 21600.0)  # Advance 6 hours in seconds per rollout step
+            pred_delta = self.forward(current_history, step_ts)
 
-        pred_norm = (pred_full - self.mu.view(1, 1, 1, 6)) / self.sigma.view(1, 1, 1, 6)
-        target_norm = (y_target_full - self.mu.view(1, 1, 1, 6)) / self.sigma.view(1, 1, 1, 6)
+            # State prediction at step k
+            x_latest = current_history[:, :, -6:]
+            pred_full = x_latest + pred_delta
 
-        weighted_sq_error = ((pred_norm - target_norm) ** 2) * self.loss_weights
+            target_k = y_target_seq[:, k, :, :] if y_target_seq.ndim == 4 else y_target_seq[:, 0, :, :]
 
-        total_loss = torch.mean(weighted_sq_error)
+            # Compute standardized step MSE loss
+            pred_norm = (pred_full.view(batch_size, self.num_nodes, self.num_levels, 6) - self.mu.view(1, 1, 1, 6)) / self.sigma.view(1, 1, 1, 6)
+            target_norm = (target_k.view(batch_size, self.num_nodes, self.num_levels, 6) - self.mu.view(1, 1, 1, 6)) / self.sigma.view(1, 1, 1, 6)
+
+            weighted_sq_error = ((pred_norm - target_norm) ** 2) * self.loss_weights
+            step_mse = torch.mean(weighted_sq_error)
+
+            # Global moisture conservation penalty
+            delta_q = pred_delta.view(batch_size, self.num_nodes, self.num_levels, 6)[:, :, :, 1]
+            global_moisture_drift = torch.mean(torch.sum(delta_q, dim=2))
+            moisture_penalty = global_moisture_drift ** 2
+
+            total_unrolled_loss += step_mse + (self.lambda_moisture * moisture_penalty)
+
+            # Autoregressively update history tensor for next unrolled step
+            current_history = torch.cat([current_history[:, :, 6:], pred_full], dim=-1)
+
+        total_loss = total_unrolled_loss / self.rollout_steps
 
         key_alias = "val_loss" if stage_name == "val" else "train_loss"
         self.log(key_alias, total_loss, prog_bar=True, sync_dist=True)
