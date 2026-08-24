@@ -13,6 +13,8 @@ import torch.nn as nn
 import pytorch_lightning as pl
 from typing import Dict, Any, Tuple, Optional
 
+from torch.utils.checkpoint import checkpoint
+
 from models.graphcast import DeepGraphCastModel
 
 
@@ -43,19 +45,23 @@ class StandardGraphCastLitModule(pl.LightningModule):
         self.register_buffer("sigma", torch.tensor(sigma_vals, dtype=torch.float32).view(1, 1, 6))
 
         # Model Architecture
+
         self.in_channels = cfg.get("in_channels", 15)
         self.out_channels = cfg.get("out_channels", 6)
-        self.latent_dim = cfg.get("latent_dim", 256)
-        self.processor_layers = cfg.get("processor_layers", 16)
-        self.hierarchy_levels = cfg.get("hierarchy_levels", [6, 5, 4, 3, 2, 1, 0])
-        self.history_steps = cfg.get("history_steps", 2)
+        self.latent_dim = cfg.get("latent_dim", cfg.get("model_params", {}).get("latent_dim", 384))
+        self.processor_layers = cfg.get("processor_layers", cfg.get("model_params", {}).get("processor_layers", 16))
+        self.hierarchy_levels = cfg.get("hierarchy_levels", cfg.get("model_params", {}).get("hierarchy_levels", [6, 5, 4, 3, 2, 1, 0]))
+        self.history_steps = cfg.get("history_steps", cfg.get("model_params", {}).get("history_steps", 2))
         self.rollout_steps = cfg.get("rollout_steps", 2)
 
+        # Ensure latent_dim and processor_layers are explicitly passed:
         self.model = DeepGraphCastModel(
             in_channels=self.in_channels,
             out_channels=self.out_channels,
-            latent_dim=self.latent_dim,
-            processor_layers=self.processor_layers,
+            num_levels=self.num_levels,
+            num_nodes=self.num_nodes,
+            latent_dim=self.latent_dim,              # Explicitly pass 384 or 512
+            processor_layers=self.processor_layers,  # Explicitly pass 16
             hierarchy_levels=self.hierarchy_levels,
             history_steps=self.history_steps,
         )
@@ -137,10 +143,14 @@ class StandardGraphCastLitModule(pl.LightningModule):
 
         # Multi-Step Autoregressive Unrolling during backprop
         for k in range(self.rollout_steps):
-            step_ts = timestamps + (k * 21600.0)  # Advance 6 hours in seconds per rollout step
-            pred_delta = self.forward(current_history, step_ts)
+            step_ts = timestamps + (k * 21600.0)
 
-            # State prediction at step k
+            if self.training:
+                # Gradient Checkpointing prevents CUDA OOM on multi-step rollouts
+                pred_delta = checkpoint(self.forward, current_history, step_ts, use_reentrant=False)
+            else:
+                pred_delta = self.forward(current_history, step_ts)
+
             x_latest = current_history[:, :, -6:]
             pred_full = x_latest + pred_delta
 

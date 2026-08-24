@@ -3,6 +3,8 @@ in_channels: 15
 out_channels: 6
 num_levels: 32
 num_nodes: 40962
+latent_dim: 384           # Root level key
+processor_layers: 16      # Root level key
 
 mesh:
   num_nodes: 40962
@@ -22,8 +24,8 @@ model_params:
   out_channels: 6
   history_steps: 2
   rollout_steps: 2
-  latent_dim: 512           # Set latent dimension to 512
-  processor_layers: 16      # 16 interaction blocks
+  latent_dim: 384
+  processor_layers: 16
   learning_rate: 1.0e-04
 
 training_params:

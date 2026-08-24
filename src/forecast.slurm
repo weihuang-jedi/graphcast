@@ -9,7 +9,7 @@
 ##SBATCH --partition=u1-h100
 ##SBATCH --qos=gpuwf
 ##SBATCH --gres=gpu:h100:1
-#SBATCH --time=00:35:00
+#SBATCH --time=05:35:00
 
 set -x
 
