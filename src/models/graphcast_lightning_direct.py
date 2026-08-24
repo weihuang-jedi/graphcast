@@ -26,8 +26,18 @@ class StandardGraphCastLitModule(pl.LightningModule):
         self.num_nodes = cfg.get("num_nodes", 40962)  # M6 grid default
 
         # Log-State Standardization [ln_P, Q, ln_T, U, V, W]
+        # mu_vals = cfg.get("mu_vals", [11.52, 0.0047, 5.57, 0.0, 0.0, 0.0])
+        # sigma_vals = cfg.get("sigma_vals", [0.15, 0.0045, 0.10, 5.0, 5.0, 0.1])
+
+        # Order: [ln_P, Q, ln_T, U, V, W]
+        # Setting sigma_U = 1.0 and sigma_V = 1.0 amplifies backpropagated gradients by 5x
+        # mu_vals = cfg.get("mu_vals", [11.52, 0.0047, 5.57, 0.0, 0.0, 0.0])
+        # sigma_vals = cfg.get("sigma_vals", [0.15, 0.0045, 0.10, 1.0, 1.0, 0.1])
+
+        # Order: [ln_P, Q, ln_T, U, V, W]
+        # Asymmetric sigma: tightens U and V scaling to force un-dampened wind gradients
         mu_vals = cfg.get("mu_vals", [11.52, 0.0047, 5.57, 0.0, 0.0, 0.0])
-        sigma_vals = cfg.get("sigma_vals", [0.15, 0.0045, 0.10, 5.0, 5.0, 0.1])
+        sigma_vals = cfg.get("sigma_vals", [0.25, 0.0045, 0.15, 2.0, 2.0, 0.1])
 
         self.register_buffer("mu", torch.tensor(mu_vals, dtype=torch.float32).view(1, 1, 6))
         self.register_buffer("sigma", torch.tensor(sigma_vals, dtype=torch.float32).view(1, 1, 6))

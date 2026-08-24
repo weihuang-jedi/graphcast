@@ -45,6 +45,8 @@ PYTHONPATH=. python rollout/forecast.py \
     --output_dir output \
     --device cpu
 
+#   --alpha_wind 2.2 \
+#   --alpha_w 2.5 \
 # 4. Cartesian 3D Spherical Regridder
 PYTHONPATH=. python utils/reconstruct_forecast_latlon.py \
     --fcst_dir output \

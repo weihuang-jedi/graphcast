@@ -21,24 +21,24 @@ model_params:
   in_channels: 15
   out_channels: 6
   history_steps: 2
-  rollout_steps: 2          # Unrolls 2 steps (12h) during backpropagation
-  latent_dim: 256
-  processor_layers: 16
+  rollout_steps: 2
+  latent_dim: 512           # Set latent dimension to 512
+  processor_layers: 16      # 16 interaction blocks
   learning_rate: 1.0e-04
 
 training_params:
   batch_size: 1
-  accumulate_grad_batches: 4 # Effective batch size = 4 for stable momentum gradients
+  accumulate_grad_batches: 4
   max_epochs: 25
   num_workers: 4
   gradient_clip_val: 0.5
   precision: "bf16-mixed"
 
 loss_weights:
-  weight_P: 2.0             # Stabilizes Day 4-5 pressure drift
+  weight_P: 2.0
   weight_Q: 1.0
   weight_T: 1.0
-  weight_U: 5.0             # 5x penalty forces GNN to learn full wind momentum
-  weight_V: 5.0             # 5x penalty forces GNN to learn full wind momentum
+  weight_U: 5.0
+  weight_V: 5.0
   weight_W: 1.0
   lambda_moisture: 10.0
