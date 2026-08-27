@@ -3,7 +3,7 @@ in_channels: 15
 out_channels: 6
 num_levels: 32
 num_nodes: 40962
-latent_dim: 384           # Root level key
+latent_dim: 256
 processor_layers: 16      # Root level key
 
 mesh:
@@ -24,14 +24,14 @@ model_params:
   out_channels: 6
   history_steps: 2
   rollout_steps: 2
-  latent_dim: 384
+  latent_dim: 256
   processor_layers: 16
   learning_rate: 1.0e-04
 
 training_params:
   batch_size: 1
   accumulate_grad_batches: 4
-  max_epochs: 25
+  max_epochs: 10
   num_workers: 4
   gradient_clip_val: 0.5
   precision: "bf16-mixed"

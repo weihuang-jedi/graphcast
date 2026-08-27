@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from typing import Optional
+from torch.utils.checkpoint import checkpoint
 
 
 class MLP(nn.Module):
@@ -80,8 +81,14 @@ class DeepGraphCastModel(nn.Module):
         b_size, num_flat, num_in_vars = x.shape
 
         h = self.encoder_in(x)
-        for processor_layer in self.processor_stack:
-            h = processor_layer(h, edge_index)
-        pred_delta = self.decoder_out(h)
 
+        # Apply per-layer gradient checkpointing during training
+        for processor_layer in self.processor_stack:
+            if self.training:
+                h = checkpoint(processor_layer, h, edge_index, use_reentrant=False)
+            else:
+                h = processor_layer(h, edge_index)
+
+        pred_delta = self.decoder_out(h)
         return pred_delta.reshape(b_size, num_flat, self.num_vars)
+

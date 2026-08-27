@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=training
 #SBATCH --account=epic
-#SBATCH --export=NONE
 #SBATCH --gres=gpu:h100:1
-#SBATCH --mem=256G
+#SBATCH --mem=128G
 #SBATCH --nodes=1
 #SBATCH --output=log.training_%J.out
 #SBATCH --partition=u1-h100
 #SBATCH --qos=gpuwf
-#SBATCH --time=03:30:00
+#SBATCH --export=NONE
+#SBATCH --time=12:00:00
 
 set -x
 
@@ -28,4 +28,6 @@ cd /scratch5/purged/Wei.Huang/src/graphcast/src
 # Clear legacy checkpoints
 rm -rf checkpoints/*
 
-time PYTHONPATH=. python training/training.py -c config.yaml
+time PYTHONPATH=. python training/training.py \
+  -c config.yaml \
+  --ckpt checkpoints/graphcast_m6_epoch=02_val_loss=11.9003.ckptk

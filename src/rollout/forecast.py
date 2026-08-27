@@ -140,11 +140,16 @@ def run_rollout():
         current_state = history_state[:, :, -6:] + pred_delta
 
         # Minimal safety boundaries (unconstrained momentum propagation)
-        current_state[:, :, 0] = torch.clamp(current_state[:, :, 0], min=5.0, max=12.5)    # ln(P)
+        # current_state[:, :, 0] = torch.clamp(current_state[:, :, 0], min=5.0, max=12.5)    # ln(P)
         current_state[:, :, 1] = torch.clamp(current_state[:, :, 1], min=0.0, max=0.035)   # Q
-        current_state[:, :, 2] = torch.clamp(current_state[:, :, 2], min=4.5, max=6.0)     # ln(T)
+        # current_state[:, :, 2] = torch.clamp(current_state[:, :, 2], min=4.5, max=6.0)     # ln(T)
         current_state[:, :, 3] = torch.clamp(current_state[:, :, 3], min=-120.0, max=120.0) # U
         current_state[:, :, 4] = torch.clamp(current_state[:, :, 4], min=-120.0, max=120.0) # V
+
+        # Clamp ln(P) to physical atmospheric range [500 hPa, 1060 hPa] -> [ln(50000), ln(106000)]
+        current_state[:, :, 0] = torch.clamp(current_state[:, :, 0], min=10.82, max=11.57)
+        # Clamp ln(T) to physical range [190 K, 320 K] -> [ln(190), ln(320)]
+        current_state[:, :, 2] = torch.clamp(current_state[:, :, 2], min=5.24, max=5.76)
 
         history_state = torch.cat([history_state[:, :, 6:], current_state], dim=-1)
 

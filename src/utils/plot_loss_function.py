@@ -17,7 +17,7 @@ class WeatherLossPlotter:
         self.df = None
 
     def _find_latest_csv(self):
-        log_dirs = sorted(glob.glob("lightning_logs/standard_direct_m6/version_1"))
+        log_dirs = sorted(glob.glob("lightning_logs/standard_direct_m6/version_*"))
 
         if not log_dirs:
             raise FileNotFoundError("Error: No training log directories (lightning_logs/standard_direct_m6/version_*) found.")

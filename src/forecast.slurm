@@ -33,16 +33,31 @@ rm -rf output/*.nc output_reconstructed/*.nc
 # 2. Launch Retraining on Full Zarr Targets
 # sbatch training.slurm
 
+init_ymd="20260201"
+init_hour="06"
+init_time=${init_ymd}${init_hour}
+output_dir=output/${init_ymd}/${init_hour}
+
+# Add UTC to prevent timezone offset interference
+base="${init_ymd:0:4}-${init_ymd:4:2}-${init_ymd:6:2} ${init_hour}:00 UTC"
+
+# Subtract 6 hours
+prev_date=$(date -u -d "$base - 6 hours" "+%Y%m%d")
+prev_hour=$(date -u -d "$base - 6 hours" "+%H")
+
+T0_FILE=${truthdir}/icosahedral_logstate_m6.${init_ymd}.t${init_hour}z.0p25.f000.nc
+TM6_FILE=${truthdir}/icosahedral_logstate_m6.${prev_date}.t${prev_hour}z.0p25.f000.nc
+
 # 3. After training completes, run standard direct rollout
 # Example Rollout using separate t0 (06Z) and t-1 (00Z) single-step NetCDF files
 PYTHONPATH=. python rollout/forecast.py \
     -c checkpoints/last.ckpt \
-    --input_file_t0 ${truthdir}/icosahedral_logstate_m6.20260201.t06z.0p25.f000.nc \
-    --input_file_tm1 ${truthdir}/icosahedral_logstate_m6.20260201.t00z.0p25.f000.nc \
-    --init_time 2026020106 \
+    --input_file_t0 ${T0_FILE} \
+    --input_file_tm1 ${TM6_FILE} \
+    --init_time ${init_time} \
     -s 20 \
     --step_hours 6 \
-    --output_dir output \
+    --output_dir ${output_dir} \
     --device cpu
 
 #   --alpha_wind 2.2 \

@@ -92,6 +92,7 @@ class IcosahedralZarrDataset(Dataset):
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Direct AI Weather Model")
     parser.add_argument("-c", "--config", type=str, default="config.yaml")
+    parser.add_argument("--ckpt", type=str, default=None, help="Path to checkpoint to resume training from")
     return parser.parse_args()
 
 
@@ -154,8 +155,20 @@ def main():
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
+    # Look for checkpoint to resume from (e.g. checkpoints/last.ckpt or specified via --ckpt)
+    ckpt_path = args.ckpt
+    if ckpt_path is None and os.path.exists("checkpoints/last.ckpt"):
+        ckpt_path = "checkpoints/last.ckpt"
+
+    if ckpt_path and os.path.exists(ckpt_path):
+        print(f"[RESUME] Resuming training state from checkpoint: {ckpt_path}")
+    else:
+        ckpt_path = None
+        print("[START] Starting new training run from scratch...")
+
+    # Pass ckpt_path to fit() to resume optimizer states, LR schedulers, and epoch counters
     print(f"Starting M6 training across {len(train_ds)} train samples and {len(val_ds)} val samples...")
-    trainer.fit(lit_module, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    trainer.fit(lit_module, train_dataloaders=train_loader, val_dataloaders=val_loader, ckpt_path=ckpt_path)
 
 
 if __name__ == "__main__":
