@@ -31,16 +31,16 @@ model_params:
 training_params:
   batch_size: 1
   accumulate_grad_batches: 4
-  max_epochs: 10
+  max_epochs: 20
   num_workers: 4
   gradient_clip_val: 0.5
   precision: "bf16-mixed"
 
 loss_weights:
-  weight_P: 2.0
+  weight_P: 5.0
   weight_Q: 1.0
   weight_T: 1.0
-  weight_U: 5.0
-  weight_V: 5.0
+  weight_U: 4.0
+  weight_V: 12.0
   weight_W: 1.0
   lambda_moisture: 10.0

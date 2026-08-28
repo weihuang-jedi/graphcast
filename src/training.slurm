@@ -26,8 +26,8 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 cd /scratch5/purged/Wei.Huang/src/graphcast/src
 
 # Clear legacy checkpoints
-rm -rf checkpoints/*
+# rm -rf checkpoints/*
 
 time PYTHONPATH=. python training/training.py \
   -c config.yaml \
-  --ckpt checkpoints/graphcast_m6_epoch=02_val_loss=11.9003.ckptk
+  --ckpt saved_checkpoints/epoch10.ckpt

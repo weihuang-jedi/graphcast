@@ -161,7 +161,18 @@ def main():
         ckpt_path = "checkpoints/last.ckpt"
 
     if ckpt_path and os.path.exists(ckpt_path):
-        print(f"[RESUME] Resuming training state from checkpoint: {ckpt_path}")
+        print(f"[RESUME] Resuming model weights from checkpoint: {ckpt_path}")
+        # Load model weights flexibly (strict=False avoids non-critical key crashes)
+        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        state_dict = checkpoint.get("state_dict", checkpoint)
+    
+        # Filter out static_features or shape mismatches safely
+        model_state = lit_module.state_dict()
+        filtered_state = {k: v for k, v in state_dict.items() if k in model_state and model_state[k].shape == v.shape}
+        lit_module.load_state_dict(filtered_state, strict=False)
+    
+        # Reset ckpt_path to None for fit() so trainer starts new epoch loop with updated loss formulation
+        ckpt_path = None
     else:
         ckpt_path = None
         print("[START] Starting new training run from scratch...")
