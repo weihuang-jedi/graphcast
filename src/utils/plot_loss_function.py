@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-3D GraphCast Model - Stage M3 Loss Function Analyzer
+3D GraphCast Model - Loss Function Analyzer
 Plots Total Loss, Per-Variable MSE (P, Q, T, U, V), and Zero-Mean Anomaly Penalty.
 """
 
@@ -54,7 +54,7 @@ class WeatherLossPlotter:
                 step_df[f'{col}_ema'] = step_df[col].ewm(alpha=ema_alpha, adjust=False).mean()
 
         fig, axes = plt.subplots(2, 2, figsize=(13, 8.5), sharex=True)
-        fig.suptitle('3D GraphCast Stage M3 Loss & Penalty Convergence', fontsize=15, fontweight='bold')
+        fig.suptitle('3D GraphCast Loss & Penalty Convergence', fontsize=15, fontweight='bold')
 
         # Panel 1: Total Training & Validation Loss
         ax1 = axes[0, 0]

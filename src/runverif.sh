@@ -10,3 +10,4 @@ python utils/generate_verification_metrics_and_plots.py \
     --out_dir verification_results \
     --show
 
+#   --lead_hours "list(range(6, 726, 6))" \

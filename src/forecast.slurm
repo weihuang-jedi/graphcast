@@ -5,11 +5,11 @@
 #SBATCH --mem=128G
 #SBATCH --nodes=1
 #SBATCH --output=log.forecast_%J.out
-#SBATCH --partition=u1-compute
-##SBATCH --partition=u1-h100
-##SBATCH --qos=gpuwf
-##SBATCH --gres=gpu:h100:1
-#SBATCH --time=05:35:00
+##SBATCH --partition=u1-compute
+#SBATCH --partition=u1-h100
+#SBATCH --qos=gpuwf
+#SBATCH --gres=gpu:h100:1
+#SBATCH --time=00:35:00
 
 set -x
 
@@ -33,10 +33,26 @@ rm -rf output/*.nc output_reconstructed/*.nc
 # 2. Launch Retraining on Full Zarr Targets
 # sbatch training.slurm
 
+#gnn_ckpt="checkpoints/graphcast_m6_epoch=02_val_loss=2.2485.ckpt"
+#gnn_ckpt="checkpoints/graphcast_m6_epoch=03_val_loss=2.2177.ckpt"
+gnn_ckpt="checkpoints/last-v2.ckpt"
+
 init_ymd="20260201"
 init_hour="06"
 init_time=${init_ymd}${init_hour}
 output_dir=output/${init_ymd}/${init_hour}
+
+#device=cpu
+device=cuda
+
+steps=20
+if [ "${device}" == "cuda" ]
+then
+    steps=20
+  # steps=120
+else
+    steps=20
+fi
 
 # Add UTC to prevent timezone offset interference
 base="${init_ymd:0:4}-${init_ymd:4:2}-${init_ymd:6:2} ${init_hour}:00 UTC"
@@ -51,14 +67,16 @@ TM6_FILE=${truthdir}/icosahedral_logstate_m6.${prev_date}.t${prev_hour}z.0p25.f0
 # 3. After training completes, run standard direct rollout
 # Example Rollout using separate t0 (06Z) and t-1 (00Z) single-step NetCDF files
 PYTHONPATH=. python rollout/forecast.py \
-    -c checkpoints/last.ckpt \
+    -c ${gnn_ckpt} \
     --input_file_t0 ${T0_FILE} \
     --input_file_tm1 ${TM6_FILE} \
     --init_time ${init_time} \
-    -s 20 \
+    -s ${steps} \
     --step_hours 6 \
     --output_dir ${output_dir} \
-    --device cpu
+    --device ${device}
+
+exit 0
 
 #   --alpha_wind 2.2 \
 #   --alpha_w 2.5 \

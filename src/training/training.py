@@ -2,20 +2,58 @@
 """
 3D GraphCast Lightning Training Executable for Standard Direct AI Weather Forecasting.
 Supports multi-step target loading for autoregressive training loss backpropagation.
+Includes rich epoch-level progress callbacks and GPU memory telemetry.
 """
 
 import os
+import time
 import argparse
+import logging
 import yaml
 import torch
 from torch.utils.data import Dataset, DataLoader
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, TQDMProgressBar, Callback
 from pytorch_lightning.loggers import CSVLogger
 import xarray as xr
 import numpy as np
 
 from models.graphcast_lightning_direct import StandardGraphCastLitModule
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+
+class EpochProgressLogger(Callback):
+    """Custom Lightning Callback to log detailed progress, execution times, losses, and GPU memory usage."""
+
+    def __init__(self):
+        super().__init__()
+        self.epoch_start_time = None
+
+    def on_train_epoch_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        self.epoch_start_time = time.time()
+        gpu_mem = torch.cuda.max_memory_allocated() / (1024 ** 3) if torch.cuda.is_available() else 0.0
+        logging.info(f"--- [EPOCH {trainer.current_epoch + 1}/{trainer.max_epochs} START] --- | Peak VRAM Allocated: {gpu_mem:.2f} GB")
+
+    def on_train_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        elapsed = time.time() - self.epoch_start_time if self.epoch_start_time else 0.0
+        train_loss = trainer.callback_metrics.get("train_loss", trainer.callback_metrics.get("train/loss", None))
+        val_loss = trainer.callback_metrics.get("val_loss", trainer.callback_metrics.get("val/loss", None))
+        
+        # Get current learning rate safely
+        lr = "N/A"
+        if trainer.optimizers:
+            lr = f"{trainer.optimizers[0].param_groups[0]['lr']:.2e}"
+
+        train_loss_str = f"{train_loss.item():.4f}" if train_loss is not None else "N/A"
+        val_loss_str = f"{val_loss.item():.4f}" if val_loss is not None else "N/A"
+        gpu_mem = torch.cuda.max_memory_allocated() / (1024 ** 3) if torch.cuda.is_available() else 0.0
+
+        logging.info(
+            f"--- [EPOCH {trainer.current_epoch + 1}/{trainer.max_epochs} COMPLETE] --- | "
+            f"Duration: {elapsed:.2f}s | Train Loss: {train_loss_str} | Val Loss: {val_loss_str} | "
+            f"LR: {lr} | Max VRAM: {gpu_mem:.2f} GB"
+        )
 
 
 class IcosahedralZarrDataset(Dataset):
@@ -44,6 +82,12 @@ class IcosahedralZarrDataset(Dataset):
             "w_icosahedral" if "w_icosahedral" in self.ds else "w",
         ]
 
+        logging.info(
+            f"[DATASET] Zarr Time Length: {self.time_len} | Valid Samples: {self.valid_indices} | "
+            f"History Steps: {history_steps} | Rollout Steps: {rollout_steps}"
+        )
+        logging.info(f"[DATASET] Resolved Variable Keys: {self.var_keys}")
+
     def __len__(self):
         return max(0, self.valid_indices)
 
@@ -65,7 +109,7 @@ class IcosahedralZarrDataset(Dataset):
         input_nodes_first = np.transpose(input_arr, (2, 1, 0, 3))
         x_flat = torch.tensor(input_nodes_first, dtype=torch.float32).reshape(n_nodes * num_levels, self.history_steps * 6)
 
-        # 2. Load sequence of target rollout steps: shape (rollout_steps, nodes*levels, 6)
+        # 2. Load sequence of target rollout steps
         target_seq = []
         for step in range(self.rollout_steps):
             t_target = t_history_end + step
@@ -102,14 +146,35 @@ def main():
     if os.path.exists(args.config):
         with open(args.config, "r") as f:
             cfg = yaml.safe_load(f)
+        logging.info(f"Successfully loaded configuration from '{args.config}'")
     else:
         cfg = {}
+        logging.warning(f"Config file '{args.config}' not found. Falling back to default settings.")
 
     print("=" * 80)
     print(" INITIALIZING MULTI-STEP DIRECT GRAPHCAST TRAINING RUN (M6 GRID)")
     print("=" * 80)
 
+    # Hardware & Precision Diagnostic Logging
+    device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
+    logging.info(f"[HARDWARE] Device: {device_name} | GPU Count: {torch.cuda.device_count()}")
+
     lit_module = StandardGraphCastLitModule(cfg=cfg)
+
+    # Parameter Count Diagnostic
+    total_params = sum(p.numel() for p in lit_module.parameters() if p.requires_grad)
+    logging.info(f"[MODEL DIAGNOSTICS] Total Trainable Parameters: {total_params / 1e6:.2f} Million")
+
+    train_params = cfg.get("training_params", {})
+    accum_grad = train_params.get("accumulate_grad_batches", 4)
+    batch_size = train_params.get("batch_size", 1)
+    max_epochs = train_params.get("max_epochs", 25)
+
+    logging.info(
+        f"[TRAINING PARAMS] Batch Size: {batch_size} | Accumulate Grads: {accum_grad} | "
+        f"Effective Batch Size: {batch_size * accum_grad} | Max Epochs: {max_epochs}"
+    )
+    logging.info(f"[LOSS WEIGHTS] {cfg.get('loss_weights', {})}")
 
     logger = CSVLogger("lightning_logs", name="standard_direct_m6")
     checkpoint_callback = ModelCheckpoint(
@@ -121,23 +186,22 @@ def main():
         save_last=True,
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
-
-    train_params = cfg.get("training_params", {})
-    accum_grad = train_params.get("accumulate_grad_batches", 4)
+    epoch_logger = EpochProgressLogger()
+    progress_bar = TQDMProgressBar(refresh_rate=50)
 
     trainer = pl.Trainer(
-        max_epochs=train_params.get("max_epochs", 25),
+        max_epochs=max_epochs,
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=torch.cuda.device_count() if torch.cuda.is_available() else 1,
         precision="bf16-mixed" if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 32,
         accumulate_grad_batches=accum_grad,
-        callbacks=[checkpoint_callback, lr_monitor],
+        callbacks=[checkpoint_callback, lr_monitor, epoch_logger, progress_bar],
         logger=logger,
         log_every_n_steps=10,
     )
 
     zarr_path = cfg.get("paths", {}).get("zarr_store", "data/gfs_icosahedral_m6.zarr")
-    print(f"Loading Zarr training store: {zarr_path}")
+    logging.info(f"[DATA] Loading Zarr training store from: '{zarr_path}'")
 
     dataset = IcosahedralZarrDataset(
         zarr_path=zarr_path,
@@ -150,36 +214,36 @@ def main():
     train_ds, val_ds = torch.utils.data.random_split(dataset, [train_size, val_size])
 
     num_workers = train_params.get("num_workers", 4)
-    batch_size = train_params.get("batch_size", 1)
-
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
-    # Look for checkpoint to resume from (e.g. checkpoints/last.ckpt or specified via --ckpt)
+    # Look for checkpoint to resume from
     ckpt_path = args.ckpt
     if ckpt_path is None and os.path.exists("checkpoints/last.ckpt"):
         ckpt_path = "checkpoints/last.ckpt"
 
     if ckpt_path and os.path.exists(ckpt_path):
-        print(f"[RESUME] Resuming model weights from checkpoint: {ckpt_path}")
-        # Load model weights flexibly (strict=False avoids non-critical key crashes)
+        logging.info(f"[RESUME] Resuming model weights from checkpoint: {ckpt_path}")
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         state_dict = checkpoint.get("state_dict", checkpoint)
-    
-        # Filter out static_features or shape mismatches safely
+
         model_state = lit_module.state_dict()
         filtered_state = {k: v for k, v in state_dict.items() if k in model_state and model_state[k].shape == v.shape}
-        lit_module.load_state_dict(filtered_state, strict=False)
-    
-        # Reset ckpt_path to None for fit() so trainer starts new epoch loop with updated loss formulation
+        missing, unexpected = lit_module.load_state_dict(filtered_state, strict=False)
+
+        logging.info(
+            f"[RESUME] State Dict Loaded: {len(filtered_state)}/{len(state_dict)} tensors matched. "
+            f"(Ignored keys: {len(unexpected)})"
+        )
+
         ckpt_path = None
     else:
         ckpt_path = None
-        print("[START] Starting new training run from scratch...")
+        logging.info("[START] Starting new training run from scratch...")
 
-    # Pass ckpt_path to fit() to resume optimizer states, LR schedulers, and epoch counters
-    print(f"Starting M6 training across {len(train_ds)} train samples and {len(val_ds)} val samples...")
+    logging.info(f"[FIT] Starting M6 training across {len(train_ds)} train samples and {len(val_ds)} val samples...")
     trainer.fit(lit_module, train_dataloaders=train_loader, val_dataloaders=val_loader, ckpt_path=ckpt_path)
+    logging.info("[SUCCESS] Training completed successfully.")
 
 
 if __name__ == "__main__":

@@ -3,8 +3,7 @@
 Standard Direct AI Weather Forecasting PyTorch Lightning Module.
 Trains end-to-end on Log-State physical targets X_full (ln_P, Q, ln_T, U, V, W).
 Includes multi-step autoregressive rollout unrolling during training loss calculation,
-directional zonal pressure gradient penalty, and meridional V-wind gradient penalty
-for enhanced geostrophic alignment.
+zonal pressure gradient penalty, and V-wind directional phase alignment penalty.
 """
 
 import os
@@ -72,7 +71,8 @@ class StandardGraphCastLitModule(pl.LightningModule):
         )
 
         self.lambda_moisture = loss_cfg.get("lambda_moisture", cfg.get("lambda_moisture", 10.0))
-        # self.register_buffer("static_features", None)
+        
+        # Non-persistent buffer prevents key mismatch during checkpoint loading
         self.register_buffer("static_features", None, persistent=False)
 
     def _get_static_surface_features(self, device: torch.device) -> torch.Tensor:
@@ -124,14 +124,13 @@ class StandardGraphCastLitModule(pl.LightningModule):
         x_raw, y_target_seq, timestamps = batch
         batch_size = x_raw.shape[0]
 
-        # y_target_seq shape: (B, rollout_steps, num_nodes * num_levels, 6)
         if y_target_seq.ndim == 3:
             y_target_seq = y_target_seq.unsqueeze(1)
 
         current_history = x_raw.clone()
         total_unrolled_loss = 0.0
 
-        # Multi-Step Autoregressive Unrolling during backpropagation
+        # Multi-Step Autoregressive Unrolling
         for k in range(self.rollout_steps):
             step_ts = timestamps + (k * 21600.0)
 
@@ -153,7 +152,7 @@ class StandardGraphCastLitModule(pl.LightningModule):
             step_mse = torch.mean(weighted_sq_error)
 
             # -------------------------------------------------------------------
-            # Directional Gradient Penalties for Geostrophic V-Wind Coupling
+            # Directional Gradient Penalties and V-Wind Phase Alignment
             # -------------------------------------------------------------------
             p_pred_norm = pred_norm[:, :, :, 0]
             p_target_norm = target_norm[:, :, :, 0]
@@ -165,12 +164,16 @@ class StandardGraphCastLitModule(pl.LightningModule):
             dp_dx_target = p_target_norm[:, 1:, :] - p_target_norm[:, :-1, :]
             loss_geostrophic_v = torch.mean((dp_dx_pred - dp_dx_target) ** 2)
 
-            # 2. Direct V-Wind Gradient Loss (dV/dx -> Prevents meridional phase-smoothing)
+            # 2. Direct V-Wind Spatial Gradient Loss (dV/dx)
             dv_dx_pred = v_pred_norm[:, 1:, :] - v_pred_norm[:, :-1, :]
             dv_dx_target = v_target_norm[:, 1:, :] - v_target_norm[:, :-1, :]
-            loss_v_grad = torch.mean((dv_dx_pred - dv_dx_target) ** 2)
+            loss_v_spatial = torch.mean((dv_dx_pred - dv_dx_target) ** 2)
 
-            # Global moisture conservation penalty
+            # 3. V-Wind Directional Phase Alignment Penalty
+            # Penalizes opposite-sign predictions in meridional flow
+            v_phase_penalty = torch.mean(torch.relu(-1.0 * v_pred_norm * v_target_norm))
+
+            # 4. Global moisture conservation penalty
             delta_q = pred_delta.view(batch_size, self.num_nodes, self.num_levels, 6)[:, :, :, 1]
             global_moisture_drift = torch.mean(torch.sum(delta_q, dim=2))
             moisture_penalty = global_moisture_drift ** 2
@@ -179,11 +182,12 @@ class StandardGraphCastLitModule(pl.LightningModule):
             total_unrolled_loss += (
                 step_mse
                 + (3.0 * loss_geostrophic_v)
-                + (2.0 * loss_v_grad)
+                + (5.0 * loss_v_spatial)
+                + (3.0 * v_phase_penalty)
                 + (self.lambda_moisture * moisture_penalty)
             )
 
-            # Autoregressively update history tensor for next unrolled step
+            # Autoregressively update history tensor
             current_history = torch.cat([current_history[:, :, 6:], pred_full], dim=-1)
 
         total_loss = total_unrolled_loss / self.rollout_steps
@@ -193,6 +197,12 @@ class StandardGraphCastLitModule(pl.LightningModule):
         self.log(f"{stage_name}/loss", total_loss, prog_bar=True, sync_dist=True)
 
         return total_loss
+
+    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        """Safely pops legacy buffer keys to prevent strict load_state_dict failures."""
+        state_dict = checkpoint.get("state_dict", {})
+        if "static_features" in state_dict:
+            state_dict.pop("static_features")
 
     def training_step(self, batch, batch_idx):
         return self._compute_loss(batch, "train")
@@ -204,11 +214,3 @@ class StandardGraphCastLitModule(pl.LightningModule):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate, weight_decay=1e-5)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.cfg.get("max_epochs", 25))
         return [optimizer], [scheduler]
-
-    # Add this method inside StandardGraphCastLitModule in models/graphcast_lightning_direct.py:
-
-    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        # Pop legacy static_features buffer if present to avoid strict key mismatches
-        state_dict = checkpoint.get("state_dict", {})
-        if "static_features" in state_dict:
-            state_dict.pop("static_features")

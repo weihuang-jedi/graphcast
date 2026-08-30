@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument("--truth_dir", type=str, default="/scratch5/purged/Wei.Huang/src/starviewerweathermodel/data/icosahedral-truth", help="Ground truth NetCDF directory")
     parser.add_argument("--init_time", type=str, default="2026020106", help="Forecast init time YYYYMMDDHH")
     parser.add_argument("--level_idx", type=int, default=10, help="Vertical level index for verification (0-31)")
-    parser.add_argument("--lead_hours", nargs="+", type=int, default=list(range(6, 126, 6)), help="Lead times in hours")
+    parser.add_argument("--lead_hours", nargs="+", type=int, default=list(range(6, 726, 6)), help="Lead times in hours")
     parser.add_argument("--out_dir", type=str, default="verification_results", help="Output directory for plots and summary")
     parser.add_argument("-s", "--show", action="store_true", help="Display plot interactively")
     return parser.parse_args()
