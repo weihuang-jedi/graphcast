@@ -1,10 +1,11 @@
+# config.yaml
 stage: "STANDARD"
 in_channels: 15
 out_channels: 6
 num_levels: 32
 num_nodes: 40962
 latent_dim: 256
-processor_layers: 16      # Root level key
+processor_layers: 16
 
 mesh:
   num_nodes: 40962
@@ -23,7 +24,7 @@ model_params:
   in_channels: 15
   out_channels: 6
   history_steps: 2
-  rollout_steps: 2
+  rollout_steps: 2          # Increased from 2 to 4 steps (24h backprop unrolling)
   latent_dim: 256
   processor_layers: 16
   learning_rate: 1.0e-04
@@ -31,7 +32,7 @@ model_params:
 training_params:
   batch_size: 1
   accumulate_grad_batches: 4
-  max_epochs: 8
+  max_epochs: 12
   num_workers: 4
   gradient_clip_val: 0.5
   precision: "bf16-mixed"
@@ -40,7 +41,7 @@ loss_weights:
   weight_P: 5.0
   weight_Q: 1.0
   weight_T: 1.0
-  weight_U: 4.0
-  weight_V: 12.0
+  weight_U: 6.0              # Priority on zonal momentum retention
+  weight_V: 10.0             # Priority on meridional wave stability
   weight_W: 1.0
   lambda_moisture: 10.0

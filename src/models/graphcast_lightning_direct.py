@@ -2,8 +2,8 @@
 """
 Standard Direct AI Weather Forecasting PyTorch Lightning Module.
 Trains end-to-end on Log-State physical targets X_full (ln_P, Q, ln_T, U, V, W).
-Includes multi-step autoregressive rollout unrolling during training loss calculation,
-zonal pressure gradient penalty, and V-wind directional phase alignment penalty.
+Features physical steady-state horizontal momentum residual loss (u.grad(u), Coriolis, PGF),
+variable-masked multi-step unrolling, and V-wind phase alignment.
 """
 
 import os
@@ -41,7 +41,7 @@ class StandardGraphCastLitModule(pl.LightningModule):
         self.processor_layers = cfg.get("processor_layers", cfg.get("model_params", {}).get("processor_layers", 16))
         self.hierarchy_levels = cfg.get("hierarchy_levels", cfg.get("model_params", {}).get("hierarchy_levels", [6, 5, 4, 3, 2, 1, 0]))
         self.history_steps = cfg.get("history_steps", cfg.get("model_params", {}).get("history_steps", 2))
-        self.rollout_steps = cfg.get("rollout_steps", cfg.get("model_params", {}).get("rollout_steps", 2))
+        self.rollout_steps = cfg.get("rollout_steps", cfg.get("model_params", {}).get("rollout_steps", 6))
 
         self.model = DeepGraphCastModel(
             in_channels=self.in_channels,
@@ -61,7 +61,7 @@ class StandardGraphCastLitModule(pl.LightningModule):
         w_p = loss_cfg.get("weight_P", 5.0)
         w_q = loss_cfg.get("weight_Q", 1.0)
         w_t = loss_cfg.get("weight_T", 1.0)
-        w_u = loss_cfg.get("weight_U", 4.0)
+        w_u = loss_cfg.get("weight_U", 6.0)
         w_v = loss_cfg.get("weight_V", 12.0)
         w_w = loss_cfg.get("weight_W", 1.0)
 
@@ -70,10 +70,21 @@ class StandardGraphCastLitModule(pl.LightningModule):
             torch.tensor([w_p, w_q, w_t, w_u, w_v, w_w], dtype=torch.float32).view(1, 1, 1, 6),
         )
 
+        # Masking weights for long rollout steps (k >= 2): zero out P, Q, T, W; keep U, V
+        self.register_buffer(
+            "momentum_only_mask",
+            torch.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 0.0], dtype=torch.float32).view(1, 1, 1, 6),
+        )
+
         self.lambda_moisture = loss_cfg.get("lambda_moisture", cfg.get("lambda_moisture", 10.0))
         
         # Non-persistent buffer prevents key mismatch during checkpoint loading
         self.register_buffer("static_features", None, persistent=False)
+
+        # Compute Coriolis parameter f = 2 * omega * sin(lat) across node grid
+        lat_rad = torch.linspace(-np.pi / 2.0, np.pi / 2.0, self.num_nodes, dtype=torch.float32)
+        f_coriolis = 2.0 * 7.2921e-5 * torch.sin(lat_rad).unsqueeze(-1).repeat(1, self.num_levels)
+        self.register_buffer("f_coriolis", f_coriolis.unsqueeze(0))
 
     def _get_static_surface_features(self, device: torch.device) -> torch.Tensor:
         if self.static_features is None:
@@ -105,6 +116,42 @@ class StandardGraphCastLitModule(pl.LightningModule):
 
         return self.static_features
 
+    def compute_momentum_residual_loss(
+        self, u: torch.Tensor, v: torch.Tensor, p: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Computes steady-state horizontal momentum residuals as a physical loss.
+        u, v: predicted horizontal wind components [B, N_nodes, N_levels]
+        p: predicted log-pressure / geopotential proxy field [B, N_nodes, N_levels]
+        """
+        # 1. Compute spatial gradients along the node sequence
+        du_dx = u[:, 1:, :] - u[:, :-1, :]
+        dv_dx = v[:, 1:, :] - v[:, :-1, :]
+        dp_dx = p[:, 1:, :] - p[:, :-1, :]
+
+        # Approximate orthogonal spatial derivatives via index shift
+        du_dy = u[:, :-1, :] - torch.roll(u[:, :-1, :], shifts=1, dims=1)
+        dv_dy = v[:, :-1, :] - torch.roll(v[:, :-1, :], shifts=1, dims=1)
+        dp_dy = p[:, :-1, :] - torch.roll(p[:, :-1, :], shifts=1, dims=1)
+
+        u_crop = u[:, :-1, :]
+        v_crop = v[:, :-1, :]
+        f_crop = self.f_coriolis[:, :-1, :]
+
+        # 2. Calculate non-linear advection terms: (u . grad) u and (u . grad) v
+        advection_u = (u_crop * du_dx) + (v_crop * du_dy)
+        advection_v = (u_crop * dv_dx) + (v_crop * dv_dy)
+
+        # 3. Calculate physical residuals (Advection - Coriolis + PGF)
+        R_u = advection_u - (f_crop * v_crop) + dp_dx
+        R_v = advection_v + (f_crop * u_crop) + dp_dy
+
+        # 4. Compute Mean Squared Error of the residuals
+        loss_u = torch.mean(R_u ** 2)
+        loss_v = torch.mean(R_v ** 2)
+
+        return loss_u + loss_v
+
     def forward(self, x_raw: torch.Tensor, timestamps: torch.Tensor) -> torch.Tensor:
         batch_size, num_flat, num_vars = x_raw.shape
 
@@ -130,7 +177,7 @@ class StandardGraphCastLitModule(pl.LightningModule):
         current_history = x_raw.clone()
         total_unrolled_loss = 0.0
 
-        # Multi-Step Autoregressive Unrolling
+        # Multi-Step Autoregressive Unrolling (k = 0..rollout_steps-1)
         for k in range(self.rollout_steps):
             step_ts = timestamps + (k * 21600.0)
 
@@ -144,33 +191,38 @@ class StandardGraphCastLitModule(pl.LightningModule):
 
             target_k = y_target_seq[:, k, :, :] if y_target_seq.ndim == 4 else y_target_seq[:, 0, :, :]
 
-            # Compute standardized step MSE loss
+            # Standardized fields (Shape: B, N_nodes, N_levels, 6)
             pred_norm = (pred_full.view(batch_size, self.num_nodes, self.num_levels, 6) - self.mu.view(1, 1, 1, 6)) / self.sigma.view(1, 1, 1, 6)
             target_norm = (target_k.view(batch_size, self.num_nodes, self.num_levels, 6) - self.mu.view(1, 1, 1, 6)) / self.sigma.view(1, 1, 1, 6)
 
-            weighted_sq_error = ((pred_norm - target_norm) ** 2) * self.loss_weights
+            # -------------------------------------------------------------------
+            # Step-Dependent Variable Loss Masking
+            # -------------------------------------------------------------------
+            if k < 2:
+                step_loss_weights = self.loss_weights
+            else:
+                step_loss_weights = self.loss_weights * self.momentum_only_mask
+
+            weighted_sq_error = ((pred_norm - target_norm) ** 2) * step_loss_weights
             step_mse = torch.mean(weighted_sq_error)
 
-            # -------------------------------------------------------------------
-            # Directional Gradient Penalties and V-Wind Phase Alignment
-            # -------------------------------------------------------------------
+            # Extract fields for physical momentum residual loss
             p_pred_norm = pred_norm[:, :, :, 0]
-            p_target_norm = target_norm[:, :, :, 0]
+            u_pred_norm = pred_norm[:, :, :, 3]
             v_pred_norm = pred_norm[:, :, :, 4]
             v_target_norm = target_norm[:, :, :, 4]
 
-            # 1. Zonal Pressure Gradient Penalty (dP/dx -> Geostrophic V-wind driver)
-            dp_dx_pred = p_pred_norm[:, 1:, :] - p_pred_norm[:, :-1, :]
-            dp_dx_target = p_target_norm[:, 1:, :] - p_target_norm[:, :-1, :]
-            loss_geostrophic_v = torch.mean((dp_dx_pred - dp_dx_target) ** 2)
+            # 1. Physical Steady-State Momentum Loss (u.grad(u) - fv + dp/dx)
+            loss_momentum_residual = self.compute_momentum_residual_loss(
+                u_pred_norm, v_pred_norm, p_pred_norm
+            )
 
-            # 2. Direct V-Wind Spatial Gradient Loss (dV/dx)
+            # 2. Direct V-Wind Spatial Wave Gradient Loss
             dv_dx_pred = v_pred_norm[:, 1:, :] - v_pred_norm[:, :-1, :]
             dv_dx_target = v_target_norm[:, 1:, :] - v_target_norm[:, :-1, :]
             loss_v_spatial = torch.mean((dv_dx_pred - dv_dx_target) ** 2)
 
             # 3. V-Wind Directional Phase Alignment Penalty
-            # Penalizes opposite-sign predictions in meridional flow
             v_phase_penalty = torch.mean(torch.relu(-1.0 * v_pred_norm * v_target_norm))
 
             # 4. Global moisture conservation penalty
@@ -178,16 +230,18 @@ class StandardGraphCastLitModule(pl.LightningModule):
             global_moisture_drift = torch.mean(torch.sum(delta_q, dim=2))
             moisture_penalty = global_moisture_drift ** 2
 
-            # Total combined step loss
-            total_unrolled_loss += (
+            # Progressive trajectory multiplier
+            step_weight = 1.0 + (0.25 * k)
+
+            total_unrolled_loss += step_weight * (
                 step_mse
-                + (3.0 * loss_geostrophic_v)
-                + (5.0 * loss_v_spatial)
-                + (3.0 * v_phase_penalty)
+                + (2.0 * loss_momentum_residual)
+                + (4.0 * loss_v_spatial)
+                + (2.0 * v_phase_penalty)
                 + (self.lambda_moisture * moisture_penalty)
             )
 
-            # Autoregressively update history tensor
+            # Autoregressively update history tensor for next step
             current_history = torch.cat([current_history[:, :, 6:], pred_full], dim=-1)
 
         total_loss = total_unrolled_loss / self.rollout_steps

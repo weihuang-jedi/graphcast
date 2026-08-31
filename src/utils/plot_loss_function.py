@@ -5,6 +5,7 @@ Plots Total Loss, Per-Variable MSE (P, Q, T, U, V), and Zero-Mean Anomaly Penalt
 """
 
 import os
+import re
 import glob
 import argparse
 import pandas as pd
@@ -16,8 +17,14 @@ class WeatherLossPlotter:
         self.metrics_path = metrics_path if metrics_path else self._find_latest_csv()
         self.df = None
 
+    # Method 1: Using built-in regex (No external libraries needed)
+    def natural_sort_key(self, s):
+        return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+
     def _find_latest_csv(self):
         log_dirs = sorted(glob.glob("lightning_logs/standard_direct_m6/version_*"))
+
+        log_dirs.sort(key=self.natural_sort_key)
 
         if not log_dirs:
             raise FileNotFoundError("Error: No training log directories (lightning_logs/standard_direct_m6/version_*) found.")

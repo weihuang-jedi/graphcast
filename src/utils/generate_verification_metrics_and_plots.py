@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Comprehensive Model Verification, Line Plotter, and Heatmap Generator.
-Computes RMSE, BIAS, and ACC for T, P, U, V, W, Q across lead times (f0006h - f0120h)
-and outputs verification line plots and global spatial error heatmaps.
+Computes RMSE, BIAS, ACC, and Min/Max bounds for T, P, U, V, W, Q across lead times
+and outputs verification line plots and global spatial error heatmaps with full global maps
+(East & West Hemispheres) and lat-lon markings every 30 degrees.
 """
 
 import os
@@ -14,6 +15,15 @@ import numpy as np
 import xarray as xr
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
+import matplotlib.ticker as mticker
+
+# Cartopy import for geographic map projections & coastlines
+try:
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+    HAS_CARTOPY = True
+except ImportError:
+    HAS_CARTOPY = False
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -91,11 +101,24 @@ def main():
     vars_list = ["T", "P", "U", "V", "W", "Q"]
     var_units = {"T": "K", "P": "hPa", "U": "m/s", "V": "m/s", "W": "Pa/s", "Q": "g/kg"}
 
-    metrics = {v: {"lead": [], "rmse": [], "bias": [], "acc": [], "diff_maps": []} for v in vars_list}
+    metrics = {
+        v: {
+            "lead": [],
+            "rmse": [],
+            "bias": [],
+            "acc": [],
+            "f_min": [],
+            "f_max": [],
+            "t_min": [],
+            "t_max": [],
+            "diff_maps": [],
+        }
+        for v in vars_list
+    }
 
-    print("=" * 115)
+    print("=" * 155)
     print(f" GENERATING METRICS SUMMARY (Init: {init_dt.strftime('%Y-%m-%d %HZ')} | Level Index: {args.level_idx})")
-    print("=" * 115)
+    print("=" * 155)
 
     for lead_h in args.lead_hours:
         valid_dt = init_dt + timedelta(hours=lead_h)
@@ -121,7 +144,10 @@ def main():
         ds_t = xr.open_dataset(truth_matches[0])
 
         lats = ds_f["latitude"].values if "latitude" in ds_f else np.linspace(-90, 90, 40962)
-        lons = ds_f["longitude"].values if "longitude" in ds_f else np.linspace(0, 360, 40962)
+        lons_raw = ds_f["longitude"].values if "longitude" in ds_f else np.linspace(0, 360, 40962)
+
+        # Convert 0..360 longitude coordinates to standard -180..+180 space
+        lons = ((lons_raw + 180.0) % 360.0) - 180.0
 
         for v in vars_list:
             f_val = extract_variable(ds_f, v, args.level_idx)
@@ -137,18 +163,27 @@ def main():
                 metrics[v]["rmse"].append(rmse)
                 metrics[v]["bias"].append(bias)
                 metrics[v]["acc"].append(acc)
+                metrics[v]["f_min"].append(float(np.nanmin(f_val)))
+                metrics[v]["f_max"].append(float(np.nanmax(f_val)))
+                metrics[v]["t_min"].append(float(np.nanmin(t_val)))
+                metrics[v]["t_max"].append(float(np.nanmax(t_val)))
                 metrics[v]["diff_maps"].append((lead_h, diff, lats, lons))
 
         ds_f.close()
         ds_t.close()
 
-    # Print Text Metrics Summary Table
-    print(f"{'VAR':<5} | {'LEAD':<6} | {'RMSE':<10} | {'BIAS':<10} | {'ACC':<8}")
-    print("-" * 50)
+    # Print Text Metrics Summary Table with Min/Max
+    print(f"{'VAR':<5} | {'LEAD':<6} | {'RMSE':<8} | {'BIAS':<8} | {'ACC':<7} | {'FCST MIN/MAX':<22} | {'TRUTH MIN/MAX':<22}")
+    print("-" * 105)
     for v in vars_list:
         for i, lead in enumerate(metrics[v]["lead"]):
-            print(f"{v:<5} | f{lead:03d}h  | {metrics[v]['rmse'][i]:<10.4f} | {metrics[v]['bias'][i]:<10.4f} | {metrics[v]['acc'][i]:<8.4f}")
-        print("-" * 50)
+            f_minmax = f"{metrics[v]['f_min'][i]:.2f} / {metrics[v]['f_max'][i]:.2f}"
+            t_minmax = f"{metrics[v]['t_min'][i]:.2f} / {metrics[v]['t_max'][i]:.2f}"
+            print(
+                f"{v:<5} | f{lead:03d}h  | {metrics[v]['rmse'][i]:<8.4f} | {metrics[v]['bias'][i]:<8.4f} | "
+                f"{metrics[v]['acc'][i]:<7.4f} | {f_minmax:<22} | {t_minmax:<22}"
+            )
+        print("-" * 105)
 
     # 1. Generate Verification Metric Line Plots (RMSE, BIAS, ACC)
     fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
@@ -186,42 +221,67 @@ def main():
     plt.close()
     logging.info(f"Saved metric curves to: {metrics_plot_path}")
 
-    # 2. Generate Spatial Error Heatmaps (24h, 48h, 72h, 96h, 120h)
+    # 2. Generate Spatial Error Heatmaps with Global Map (-180..+180) & 30-degree Markings
     target_leads = [24, 48, 72, 96, 120]
-    fig = plt.figure(figsize=(20, 18))
+    fig = plt.figure(figsize=(22, 18))
     gs = GridSpec(len(vars_list), len(target_leads), figure=fig)
 
     for row_idx, v in enumerate(vars_list):
         diff_dict = {item[0]: (item[1], item[2], item[3]) for item in metrics[v]["diff_maps"]}
 
         for col_idx, lead_h in enumerate(target_leads):
-            ax = fig.add_subplot(gs[row_idx, col_idx])
+            if HAS_CARTOPY:
+                ax = fig.add_subplot(gs[row_idx, col_idx], projection=ccrs.PlateCarree(central_longitude=0))
+                ax.add_feature(cfeature.COASTLINE, linewidth=0.6, edgecolor="black", alpha=0.8)
+                ax.add_feature(cfeature.BORDERS, linewidth=0.3, edgecolor="gray", alpha=0.5)
+                transform = ccrs.PlateCarree()
+            else:
+                ax = fig.add_subplot(gs[row_idx, col_idx])
+                transform = None
 
             if lead_h in diff_dict:
                 diff_data, lats, lons = diff_dict[lead_h]
                 bound = max(np.percentile(np.abs(diff_data), 98), 1e-4)
 
-                sc = ax.scatter(
-                    lons, lats, c=diff_data, cmap="RdBu_r", vmin=-bound, vmax=bound, s=1.0, alpha=0.8
-                )
+                if transform is not None:
+                    sc = ax.scatter(
+                        lons, lats, c=diff_data, cmap="RdBu_r", vmin=-bound, vmax=bound, s=0.8, alpha=0.8, transform=transform
+                    )
+                else:
+                    sc = ax.scatter(
+                        lons, lats, c=diff_data, cmap="RdBu_r", vmin=-bound, vmax=bound, s=0.8, alpha=0.8
+                    )
+
                 cbar = plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
-                cbar.ax.tick_params(labelsize=8)
+                cbar.ax.tick_params(labelsize=7)
 
                 if row_idx == 0:
                     ax.set_title(f"f{lead_h:04d}h (Valid t+{lead_h}h)", fontsize=11, fontweight="bold")
                 if col_idx == 0:
                     ax.set_ylabel(f"{v} Error\n({var_units[v]})", fontsize=11, fontweight="bold")
 
-                ax.set_xlim([0, 360])
-                ax.set_ylim([-90, 90])
-                ax.tick_params(labelsize=8)
-                ax.grid(True, linestyle=":", alpha=0.4)
+                # Configure Lat-Lon Gridlines & Tick Markings every 30 degrees (-180..+180)
+                if HAS_CARTOPY:
+                    gl = ax.gridlines(crs=ccrs.PlateCarree(), draw_labels=True, linewidth=0.4, color="gray", alpha=0.5, linestyle=":")
+                    gl.xlocator = mticker.FixedLocator(np.arange(-180, 181, 30))
+                    gl.ylocator = mticker.FixedLocator(np.arange(-90, 91, 30))
+                    gl.top_labels = False
+                    gl.right_labels = False
+                    gl.xlabel_style = {"size": 6}
+                    gl.ylabel_style = {"size": 6}
+                else:
+                    ax.set_xticks(np.arange(-180, 181, 30))
+                    ax.set_yticks(np.arange(-90, 91, 30))
+                    ax.set_xlim([-180, 180])
+                    ax.set_ylim([-90, 90])
+                    ax.tick_params(labelsize=6)
+                    ax.grid(True, linestyle=":", linewidth=0.4, color="gray", alpha=0.5)
             else:
                 ax.text(0.5, 0.5, "N/A", ha="center", va="center")
                 ax.axis("off")
 
     plt.suptitle(
-        f"Global Error Heatmaps (Forecast - Truth) across Lead Times\nInit: {init_dt.strftime('%Y-%m-%d %HZ')} | Level Index: {args.level_idx}",
+        f"Global Error Heatmaps (Forecast - Truth) with Full Globe Coverage\nInit: {init_dt.strftime('%Y-%m-%d %HZ')} | Level Index: {args.level_idx}",
         fontsize=16,
         fontweight="bold",
         y=0.995,
