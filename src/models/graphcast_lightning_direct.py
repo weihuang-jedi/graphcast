@@ -2,8 +2,8 @@
 """
 Standard Direct AI Weather Forecasting PyTorch Lightning Module.
 Trains end-to-end on Log-State physical targets X_full (ln_P, Q, ln_T, U, V, W).
-Features physical steady-state horizontal momentum residual loss (u.grad(u), Coriolis, PGF),
-variable-masked multi-step unrolling, and V-wind phase alignment.
+Combines Non-Linear Steady-State Momentum Residuals with Variance Preservation
+to eliminate spatial over-smoothing and variance collapse in U and V wind fields.
 """
 
 import os
@@ -77,8 +77,6 @@ class StandardGraphCastLitModule(pl.LightningModule):
         )
 
         self.lambda_moisture = loss_cfg.get("lambda_moisture", cfg.get("lambda_moisture", 10.0))
-        
-        # Non-persistent buffer prevents key mismatch during checkpoint loading
         self.register_buffer("static_features", None, persistent=False)
 
         # Compute Coriolis parameter f = 2 * omega * sin(lat) across node grid
@@ -129,7 +127,6 @@ class StandardGraphCastLitModule(pl.LightningModule):
         dv_dx = v[:, 1:, :] - v[:, :-1, :]
         dp_dx = p[:, 1:, :] - p[:, :-1, :]
 
-        # Approximate orthogonal spatial derivatives via index shift
         du_dy = u[:, :-1, :] - torch.roll(u[:, :-1, :], shifts=1, dims=1)
         dv_dy = v[:, :-1, :] - torch.roll(v[:, :-1, :], shifts=1, dims=1)
         dp_dy = p[:, :-1, :] - torch.roll(p[:, :-1, :], shifts=1, dims=1)
@@ -206,35 +203,47 @@ class StandardGraphCastLitModule(pl.LightningModule):
             weighted_sq_error = ((pred_norm - target_norm) ** 2) * step_loss_weights
             step_mse = torch.mean(weighted_sq_error)
 
-            # Extract fields for physical momentum residual loss
-            p_pred_norm = pred_norm[:, :, :, 0]
-            u_pred_norm = pred_norm[:, :, :, 3]
-            v_pred_norm = pred_norm[:, :, :, 4]
-            v_target_norm = target_norm[:, :, :, 4]
+            # Extract normalized fields
+            p_pred_norm, p_target_norm = pred_norm[:, :, :, 0], target_norm[:, :, :, 0]
+            u_pred_norm, u_target_norm = pred_norm[:, :, :, 3], target_norm[:, :, :, 3]
+            v_pred_norm, v_target_norm = pred_norm[:, :, :, 4], target_norm[:, :, :, 4]
 
-            # 1. Physical Steady-State Momentum Loss (u.grad(u) - fv + dp/dx)
-            loss_momentum_residual = self.compute_momentum_residual_loss(
-                u_pred_norm, v_pred_norm, p_pred_norm
+            # 1. Variance Preservation Loss (Stops Over-Smoothing / Range Collapse)
+            std_u_pred = torch.std(u_pred_norm, dim=1)
+            std_u_target = torch.std(u_target_norm, dim=1)
+            std_v_pred = torch.std(v_pred_norm, dim=1)
+            std_v_target = torch.std(v_target_norm, dim=1)
+            std_p_pred = torch.std(p_pred_norm, dim=1)
+            std_p_target = torch.std(p_target_norm, dim=1)
+
+            loss_variance = (
+                torch.mean(torch.abs(std_u_pred - std_u_target))
+                + torch.mean(torch.abs(std_v_pred - std_v_target))
+                + torch.mean(torch.abs(std_p_pred - std_p_target))
             )
 
-            # 2. Direct V-Wind Spatial Wave Gradient Loss
+            # 2. Steady-State Physical Momentum Residual Loss
+            loss_momentum_residual = self.compute_momentum_residual_loss(u_pred_norm, v_pred_norm, p_pred_norm)
+
+            # 3. Direct V-Wind Spatial Wave Gradient Loss
             dv_dx_pred = v_pred_norm[:, 1:, :] - v_pred_norm[:, :-1, :]
             dv_dx_target = v_target_norm[:, 1:, :] - v_target_norm[:, :-1, :]
             loss_v_spatial = torch.mean((dv_dx_pred - dv_dx_target) ** 2)
 
-            # 3. V-Wind Directional Phase Alignment Penalty
+            # 4. V-Wind Directional Phase Alignment Penalty
             v_phase_penalty = torch.mean(torch.relu(-1.0 * v_pred_norm * v_target_norm))
 
-            # 4. Global moisture conservation penalty
+            # 5. Global moisture conservation penalty
             delta_q = pred_delta.view(batch_size, self.num_nodes, self.num_levels, 6)[:, :, :, 1]
             global_moisture_drift = torch.mean(torch.sum(delta_q, dim=2))
             moisture_penalty = global_moisture_drift ** 2
 
-            # Progressive trajectory multiplier
+            # Progressive trajectory weight
             step_weight = 1.0 + (0.25 * k)
 
             total_unrolled_loss += step_weight * (
                 step_mse
+                + (5.0 * loss_variance)
                 + (2.0 * loss_momentum_residual)
                 + (4.0 * loss_v_spatial)
                 + (2.0 * v_phase_penalty)

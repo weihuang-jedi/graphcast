@@ -8,7 +8,7 @@
 #SBATCH --partition=u1-h100
 #SBATCH --qos=gpuwf
 #SBATCH --export=NONE
-#SBATCH --time=12:00:00
+#SBATCH --time=16:00:00
 
 set -x
 
