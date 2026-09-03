@@ -29,8 +29,7 @@ cd /scratch5/purged/Wei.Huang/src/graphcast/src
 # rm -rf checkpoints/*
 
 time PYTHONPATH=. python training/training.py \
-  -c config.yaml
-
-# --ckpt checkpoints/last-v5.ckpt
+  -c config.yaml \
+  --ckpt saved_checkpoints/last-v1.ckpt
 
 # --ckpt saved_checkpoints/epoch10.ckpt

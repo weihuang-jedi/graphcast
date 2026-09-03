@@ -2,8 +2,9 @@
 """
 Standard Direct AI Weather Forecasting PyTorch Lightning Module.
 Trains end-to-end on Log-State physical targets X_full (ln_P, Q, ln_T, U, V, W).
-Features numerically stable 3D Thermodynamic Momentum Residual Loss (using reference T_ref=288K
-and clipped spatial derivatives), Variance Preservation Loss, and Step-Masked Autoregressive Unrolling.
+Features 3D Steady-State Momentum Residual Loss, Global Mass/Pressure Conservation,
+Symmetric Range & Variance Preservation (preventing U-wind jet over-shooting),
+and Step-Masked Autoregressive Unrolling.
 """
 
 import os
@@ -118,21 +119,20 @@ class StandardGraphCastLitModule(pl.LightningModule):
         self, u: torch.Tensor, v: torch.Tensor, w: torch.Tensor, p_log: torch.Tensor
     ) -> torch.Tensor:
         """
-        Computes numerically stable 3D steady-state horizontal momentum residuals.
-        Uses reference temperature Rd*T_ref = 82670.4 m^2/s^2 to eliminate exponential gradient blowup.
+        Computes 3D steady-state horizontal momentum residuals with balanced PGF scaling.
         """
-        rd_t_ref = 287.05 * 288.15  # ~82670.4 J/kg (Numerically stable constant multiplier)
+        rd_t_ref = 287.05 * 288.15  # ~82670.4 J/kg
 
-        # 1. Compute and clamp spatial derivatives to prevent gradient explosions
+        # Clamped spatial derivatives
         du_dx = torch.clamp(u[:, 1:, :] - u[:, :-1, :], -5.0, 5.0)
         dv_dx = torch.clamp(v[:, 1:, :] - v[:, :-1, :], -5.0, 5.0)
-        dp_dx = torch.clamp(p_log[:, 1:, :] - p_log[:, :-1, :], -2.0, 2.0)
+        dp_dx = torch.clamp(p_log[:, 1:, :] - p_log[:, :-1, :], -1.0, 1.0)
 
         du_dy = torch.clamp(u[:, :-1, :] - torch.roll(u[:, :-1, :], shifts=1, dims=1), -5.0, 5.0)
         dv_dy = torch.clamp(v[:, :-1, :] - torch.roll(v[:, :-1, :], shifts=1, dims=1), -5.0, 5.0)
-        dp_dy = torch.clamp(p_log[:, :-1, :] - torch.roll(p_log[:, :-1, :], shifts=1, dims=1), -2.0, 2.0)
+        dp_dy = torch.clamp(p_log[:, :-1, :] - torch.roll(p_log[:, :-1, :], shifts=1, dims=1), -1.0, 1.0)
 
-        # 2. Vertical gradients across levels (dim=2)
+        # Vertical level gradients (dim=2)
         du_dz = torch.clamp(u[:, :-1, 1:] - u[:, :-1, :-1], -5.0, 5.0)
         dv_dz = torch.clamp(v[:, :-1, 1:] - v[:, :-1, :-1], -5.0, 5.0)
         du_dz = torch.cat([du_dz, du_dz[:, :, -1:]], dim=-1)
@@ -143,14 +143,13 @@ class StandardGraphCastLitModule(pl.LightningModule):
         w_crop = w[:, :-1, :]
         f_crop = self.f_coriolis[:, :-1, :]
 
-        # 3. 3D Advection: (u.grad)u + (v.grad)u + (w.grad)u
+        # 3D Advection
         advection_u = (u_crop * du_dx) + (v_crop * du_dy) + (w_crop * du_dz)
         advection_v = (u_crop * dv_dx) + (v_crop * dv_dy) + (w_crop * dv_dz)
 
-        # 4. Physical Residuals: Advection - Coriolis + PGF
-        # pgf = Rd * T_ref * d(ln P)/dx
-        pgf_u = rd_t_ref * dp_dx * 1e-4  # Scaled to normalized magnitude
-        pgf_v = rd_t_ref * dp_dy * 1e-4
+        # Balanced PGF scaling (1e-5 multiplier prevents mass drift)
+        pgf_u = rd_t_ref * dp_dx * 1e-5
+        pgf_v = rd_t_ref * dp_dy * 1e-5
 
         R_u = advection_u - (f_crop * v_crop) + pgf_u
         R_v = advection_v + (f_crop * u_crop) + pgf_v
@@ -198,7 +197,7 @@ class StandardGraphCastLitModule(pl.LightningModule):
             pred_norm = (pred_full.view(batch_size, self.num_nodes, self.num_levels, 6) - self.mu.view(1, 1, 1, 6)) / self.sigma.view(1, 1, 1, 6)
             target_norm = (target_k.view(batch_size, self.num_nodes, self.num_levels, 6) - self.mu.view(1, 1, 1, 6)) / self.sigma.view(1, 1, 1, 6)
 
-            # Masking for long unrolling steps
+            # Masking for long unrolling steps (k >= 2)
             if k < 2:
                 step_loss_weights = self.loss_weights
             else:
@@ -207,24 +206,29 @@ class StandardGraphCastLitModule(pl.LightningModule):
             weighted_sq_error = ((pred_norm - target_norm) ** 2) * step_loss_weights
             step_mse = torch.mean(weighted_sq_error)
 
-            # Extract fields
+            # Extract normalized fields
             p_pred_norm, p_target_norm = pred_norm[:, :, :, 0], target_norm[:, :, :, 0]
             u_pred_norm, u_target_norm = pred_norm[:, :, :, 3], target_norm[:, :, :, 3]
             v_pred_norm, v_target_norm = pred_norm[:, :, :, 4], target_norm[:, :, :, 4]
             w_pred_norm = pred_norm[:, :, :, 5]
 
-            # 1. Variance Preservation Loss
+            # 1. Symmetric Range & Variance Preservation Loss (Prevents U-jet over-shooting and variance collapse)
             std_u_pred, std_u_target = torch.std(u_pred_norm, dim=1), torch.std(u_target_norm, dim=1)
             std_v_pred, std_v_target = torch.std(v_pred_norm, dim=1), torch.std(v_target_norm, dim=1)
             std_p_pred, std_p_target = torch.std(p_pred_norm, dim=1), torch.std(p_target_norm, dim=1)
+
+            max_u_pred, max_u_target = torch.max(u_pred_norm, dim=1)[0], torch.max(u_target_norm, dim=1)[0]
+            min_u_pred, min_u_target = torch.min(u_pred_norm, dim=1)[0], torch.min(u_target_norm, dim=1)[0]
 
             loss_variance = (
                 torch.mean(torch.abs(std_u_pred - std_u_target))
                 + torch.mean(torch.abs(std_v_pred - std_v_target))
                 + torch.mean(torch.abs(std_p_pred - std_p_target))
+                + 0.5 * torch.mean(torch.abs(max_u_pred - max_u_target))
+                + 0.5 * torch.mean(torch.abs(min_u_pred - min_u_target))
             )
 
-            # 2. Stable 3D Momentum Loss
+            # 2. Balanced 3D Momentum Loss
             loss_momentum_residual = self.compute_momentum_residual_loss(
                 u_pred_norm, v_pred_norm, w_pred_norm, p_pred_norm
             )
@@ -237,7 +241,10 @@ class StandardGraphCastLitModule(pl.LightningModule):
             # 4. Phase Alignment Penalty
             v_phase_penalty = torch.mean(torch.relu(-1.0 * v_pred_norm * v_target_norm))
 
-            # 5. Moisture Conservation
+            # 5. Global Surface Pressure Mass Conservation Penalty
+            mass_drift_penalty = (torch.mean(p_pred_norm) - torch.mean(p_target_norm)) ** 2
+
+            # 6. Moisture Conservation Penalty
             delta_q = pred_delta.view(batch_size, self.num_nodes, self.num_levels, 6)[:, :, :, 1]
             global_moisture_drift = torch.mean(torch.sum(delta_q, dim=2))
             moisture_penalty = global_moisture_drift ** 2
@@ -247,9 +254,10 @@ class StandardGraphCastLitModule(pl.LightningModule):
             total_unrolled_loss += step_weight * (
                 step_mse
                 + (2.0 * loss_variance)
-                + (0.5 * loss_momentum_residual)
+                + (0.2 * loss_momentum_residual)
                 + (2.0 * loss_v_spatial)
                 + (1.0 * v_phase_penalty)
+                + (10.0 * mass_drift_penalty)
                 + (self.lambda_moisture * moisture_penalty)
             )
 

@@ -32,7 +32,7 @@ model_params:
 training_params:
   batch_size: 1
   accumulate_grad_batches: 4
-  max_epochs: 8
+  max_epochs: 6
   num_workers: 4
   gradient_clip_val: 0.5
   precision: "bf16-mixed"

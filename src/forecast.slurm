@@ -35,7 +35,8 @@ rm -rf output/*.nc output_reconstructed/*.nc
 
 #gnn_ckpt="checkpoints/graphcast_m6_epoch=03_val_loss=2.2177.ckpt"
 #gnn_ckpt="saved_checkpoints/last-v3.ckpt"
-gnn_ckpt="checkpoints/last.ckpt"
+#gnn_ckpt="checkpoints/last.ckpt"
+gnn_ckpt="checkpoints/last-v1.ckpt"
 
 init_ymd="20260201"
 init_hour="06"

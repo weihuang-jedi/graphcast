@@ -2,7 +2,8 @@
 """
 3D GraphCast Lightning Training Executable for Standard Direct AI Weather Forecasting.
 Supports multi-step target loading for autoregressive training loss backpropagation.
-Includes rich epoch-level progress callbacks and GPU memory telemetry.
+Includes rich epoch-level progress callbacks, GPU memory telemetry, and seamless
+checkpoint state resumption (preserving epoch numbers, steps, and optimizer states).
 """
 
 import os
@@ -219,30 +220,27 @@ def main():
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
-    # Checkpoint handle for training resume
+    # Resolve checkpoint handle for full Lightning resumption
     ckpt_path = args.ckpt
     if ckpt_path is None and os.path.exists("checkpoints/last.ckpt"):
         ckpt_path = "checkpoints/last.ckpt"
 
     if ckpt_path and os.path.exists(ckpt_path):
-        logging.info(f"[RESUME] Resuming model weights from checkpoint: {ckpt_path}")
-        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        state_dict = checkpoint.get("state_dict", checkpoint)
-
-        model_state = lit_module.state_dict()
-        filtered_state = {k: v for k, v in state_dict.items() if k in model_state and model_state[k].shape == v.shape}
-        missing, unexpected = lit_module.load_state_dict(filtered_state, strict=False)
-
+        # Inspect checkpoint metadata to log the exact epoch being resumed
+        ckpt_meta = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        resumed_epoch = ckpt_meta.get("epoch", 0)
+        global_step = ckpt_meta.get("global_step", 0)
         logging.info(
-            f"[RESUME] State Dict Loaded: {len(filtered_state)}/{len(state_dict)} tensors matched. "
-            f"(Ignored keys: {len(unexpected)})"
+            f"[RESUME] Found valid checkpoint: '{ckpt_path}' | "
+            f"Resuming at Epoch {resumed_epoch + 1} (Global Step {global_step})"
         )
-        ckpt_path = None
     else:
         ckpt_path = None
         logging.info("[START] Starting new training run from scratch...")
 
-    logging.info(f"[FIT] Starting M6 training across {len(train_ds)} train samples and {len(val_ds)} val samples...")
+    logging.info(f"[FIT] Executing trainer.fit across {len(train_ds)} train samples and {len(val_ds)} val samples...")
+    
+    # Passing ckpt_path directly restores epoch count, optimizer states, and learning rate schedulers
     trainer.fit(lit_module, train_dataloaders=train_loader, val_dataloaders=val_loader, ckpt_path=ckpt_path)
     logging.info("[SUCCESS] Training completed successfully.")
 
