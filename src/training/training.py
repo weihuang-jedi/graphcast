@@ -180,14 +180,17 @@ def main():
     logging.info(f"[LOSS WEIGHTS] {cfg.get('loss_weights', {})}")
 
     logger = CSVLogger("lightning_logs", name="standard_direct_m6")
+    # Save a checkpoint at EVERY epoch without dropping older ones
     checkpoint_callback = ModelCheckpoint(
         dirpath="checkpoints",
-        filename="graphcast_m6_{epoch:02d}_{val_loss:.4f}",
-        save_top_k=3,
+        filename="graphcast_m6_epoch_{epoch:02d}",
+        save_top_k=-1,          # Retains all epoch checkpoints
+        every_n_epochs=1,       # Forces save on every single epoch
         monitor="val_loss",
         mode="min",
-        save_last=True,
+        save_last=True,         # Keeps last.ckpt updated for fast resumption
     )
+
     lr_monitor = LearningRateMonitor(logging_interval="step")
     epoch_logger = EpochProgressLogger()
     progress_bar = TQDMProgressBar(refresh_rate=50)
