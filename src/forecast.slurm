@@ -9,7 +9,7 @@
 #SBATCH --partition=u1-h100
 #SBATCH --qos=gpuwf
 #SBATCH --gres=gpu:h100:1
-#SBATCH --time=00:35:00
+#SBATCH --time=00:05:00
 
 set -x
 
@@ -33,10 +33,9 @@ rm -rf output/*.nc output_reconstructed/*.nc
 # 2. Launch Retraining on Full Zarr Targets
 # sbatch training.slurm
 
-#gnn_ckpt="checkpoints/graphcast_m6_epoch=02_val_loss=2.2485.ckpt"
 #gnn_ckpt="checkpoints/graphcast_m6_epoch=03_val_loss=2.2177.ckpt"
-#gnn_ckpt="checkpoints/last-v2.ckpt"
-gnn_ckpt="saved_checkpoints/last-v3.ckpt"
+#gnn_ckpt="saved_checkpoints/last-v3.ckpt"
+gnn_ckpt="checkpoints/last.ckpt"
 
 init_ymd="20260201"
 init_hour="06"

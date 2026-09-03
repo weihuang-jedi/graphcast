@@ -8,7 +8,7 @@
 #SBATCH --partition=u1-h100
 #SBATCH --qos=gpuwf
 #SBATCH --export=NONE
-#SBATCH --time=16:00:00
+#SBATCH --time=11:30:00
 
 set -x
 
@@ -29,6 +29,8 @@ cd /scratch5/purged/Wei.Huang/src/graphcast/src
 # rm -rf checkpoints/*
 
 time PYTHONPATH=. python training/training.py \
-  -c config.yaml \
-  --ckpt saved_checkpoints/last-v2.ckpt
+  -c config.yaml
+
+# --ckpt checkpoints/last-v5.ckpt
+
 # --ckpt saved_checkpoints/epoch10.ckpt

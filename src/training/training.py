@@ -39,7 +39,7 @@ class EpochProgressLogger(Callback):
         elapsed = time.time() - self.epoch_start_time if self.epoch_start_time else 0.0
         train_loss = trainer.callback_metrics.get("train_loss", trainer.callback_metrics.get("train/loss", None))
         val_loss = trainer.callback_metrics.get("val_loss", trainer.callback_metrics.get("val/loss", None))
-        
+
         # Get current learning rate safely
         lr = "N/A"
         if trainer.optimizers:
@@ -57,7 +57,7 @@ class EpochProgressLogger(Callback):
 
 
 class IcosahedralZarrDataset(Dataset):
-    def __init__(self, zarr_path: str, history_steps: int = 2, rollout_steps: int = 2):
+    def __init__(self, zarr_path: str, history_steps: int = 2, rollout_steps: int = 6):
         super().__init__()
         if not os.path.exists(zarr_path):
             raise FileNotFoundError(f"Zarr dataset store not found at '{zarr_path}'")
@@ -95,21 +95,23 @@ class IcosahedralZarrDataset(Dataset):
         t_start = idx
         t_history_end = idx + self.history_steps
 
-        # 1. Load history sequence across all 6 variables
+        # 1. Load history sequence across all 6 variables: (history_steps, levels, nodes)
         input_vars = []
         for key in self.var_keys:
             if key in self.ds:
                 da = self.ds[key].isel(time=slice(t_start, t_history_end))
-                val = np.asarray(da.values, dtype=np.float32)  # (history_steps, levels, nodes)
+                val = np.asarray(da.values, dtype=np.float32)
                 input_vars.append(val)
 
         input_arr = np.stack(input_vars, axis=-1)  # (history_steps, levels, nodes, 6)
         num_levels, n_nodes = input_arr.shape[1], input_arr.shape[2]
 
+        # Re-order to nodes-first layout: (nodes, levels, history_steps, 6)
         input_nodes_first = np.transpose(input_arr, (2, 1, 0, 3))
+        # Flatten spatial dimensions: (n_nodes * num_levels, history_steps * 6)
         x_flat = torch.tensor(input_nodes_first, dtype=torch.float32).reshape(n_nodes * num_levels, self.history_steps * 6)
 
-        # 2. Load sequence of target rollout steps
+        # 2. Load sequence of target rollout steps: shape (rollout_steps, n_nodes * num_levels, 6)
         target_seq = []
         for step in range(self.rollout_steps):
             t_target = t_history_end + step
@@ -155,13 +157,13 @@ def main():
     print(" INITIALIZING MULTI-STEP DIRECT GRAPHCAST TRAINING RUN (M6 GRID)")
     print("=" * 80)
 
-    # Hardware & Precision Diagnostic Logging
+    # Hardware Diagnostic Logging
     device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
     logging.info(f"[HARDWARE] Device: {device_name} | GPU Count: {torch.cuda.device_count()}")
 
     lit_module = StandardGraphCastLitModule(cfg=cfg)
 
-    # Parameter Count Diagnostic
+    # Parameter Diagnostic
     total_params = sum(p.numel() for p in lit_module.parameters() if p.requires_grad)
     logging.info(f"[MODEL DIAGNOSTICS] Total Trainable Parameters: {total_params / 1e6:.2f} Million")
 
@@ -206,7 +208,7 @@ def main():
     dataset = IcosahedralZarrDataset(
         zarr_path=zarr_path,
         history_steps=cfg.get("model_params", {}).get("history_steps", 2),
-        rollout_steps=cfg.get("model_params", {}).get("rollout_steps", 2),
+        rollout_steps=cfg.get("model_params", {}).get("rollout_steps", 6),
     )
 
     val_size = max(1, int(len(dataset) * 0.2))
@@ -217,7 +219,7 @@ def main():
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
-    # Look for checkpoint to resume from
+    # Checkpoint handle for training resume
     ckpt_path = args.ckpt
     if ckpt_path is None and os.path.exists("checkpoints/last.ckpt"):
         ckpt_path = "checkpoints/last.ckpt"
@@ -235,7 +237,6 @@ def main():
             f"[RESUME] State Dict Loaded: {len(filtered_state)}/{len(state_dict)} tensors matched. "
             f"(Ignored keys: {len(unexpected)})"
         )
-
         ckpt_path = None
     else:
         ckpt_path = None
