@@ -2,8 +2,8 @@
 """
 Standard Direct AI Weather Forecasting PyTorch Lightning Module.
 Trains end-to-end on Log-State physical targets X_full (ln_P, Q, ln_T, U, V, W).
-Features complete 3D Navier-Stokes Physics Loss Suite with zero-mean global surface
-pressure delta projection to guarantee strict mass conservation across long rollouts.
+Features complete 3D Navier-Stokes Physics Loss Suite with soft global mass projection
+and explicit surface-level mass penalty to guarantee strict mass conservation across long rollouts.
 """
 
 import os
@@ -207,7 +207,7 @@ class StandardGraphCastLitModule(pl.LightningModule):
         dz = 250.0
 
         drho_dx = torch.clamp((p_log[:, 1:, :] - p_log[:, :-1, :]) - (t_log[:, 1:, :] - t_log[:, :-1, :]), -2.0, 2.0)
-        drho_dy = torch.clamp((p_log[:, :-1, :] - torch.roll(p_log[:, :-1, :], shifts=1, dims=1)) - 
+        drho_dy = torch.clamp((p_log[:, :-1, :] - torch.roll(p_log[:, :-1, :], shifts=1, dims=1)) -
                               (t_log[:, :-1, :] - torch.roll(t_log[:, :-1, :], shifts=1, dims=1)), -2.0, 2.0)
 
         drho_dz = torch.clamp((p_log[:, :, 1:] - p_log[:, :, :-1]) - (t_log[:, :, 1:] - t_log[:, :, :-1]), -2.0, 2.0)
@@ -240,22 +240,13 @@ class StandardGraphCastLitModule(pl.LightningModule):
 
         pred_delta_norm = self.model(x_input, None, timestamps)
 
-        # =========================================================================
-        # IN-GRAPH STRICT MASS CONSERVATION PROJECTION
-        # Zero out the global spatial mean surface pressure delta ln(P) [channel 0]
-        # =========================================================================
-        pred_delta_3d = pred_delta_norm.view(batch_size, self.num_nodes, self.num_levels, 6)
-        # p_delta = pred_delta_3d[:, :, :, 0]
-        # p_delta_zero_mean = p_delta - torch.mean(p_delta, dim=(1, 2), keepdim=True)
-        # pred_delta_3d[:, :, :, 0] = p_delta_zero_mean
-
         # Soft mass conservation projection to prevent over-correction
+        pred_delta_3d = pred_delta_norm.view(batch_size, self.num_nodes, self.num_levels, 6)
         p_delta = pred_delta_3d[:, :, :, 0]
         p_delta_mean = torch.mean(p_delta, dim=(1, 2), keepdim=True)
         pred_delta_3d[:, :, :, 0] = p_delta - (0.5 * p_delta_mean)  # Soft projection (0.5 weight)
-        
+
         pred_delta_norm = pred_delta_3d.view(batch_size, num_flat, 6)
-        # =========================================================================
 
         pred_delta = pred_delta_norm * self.sigma
         return pred_delta
@@ -338,8 +329,11 @@ class StandardGraphCastLitModule(pl.LightningModule):
             loss_v_spatial = torch.mean((dv_dx_pred - dv_dx_target) ** 2)
             v_phase_penalty = torch.mean(torch.relu(-1.0 * v_pred_norm * v_target_norm))
 
-            # 5. Normalized Mass & Moisture Conservation Penalties
+            # 5. Mass & Moisture Conservation Penalties (With Surface Specific Mass Penalty)
             mass_drift_penalty = (torch.mean(p_pred_norm) - torch.mean(p_target_norm)) ** 2
+            
+            # Explicit Level 0 (Surface Pressure) Mass Drift Penalty
+            loss_surf_mass = (torch.mean(p_pred_norm[:, :, 0]) - torch.mean(p_target_norm[:, :, 0])) ** 2
 
             delta_q = pred_delta.view(batch_size, self.num_nodes, self.num_levels, 6)[:, :, :, 1]
             moisture_penalty = torch.mean((torch.mean(delta_q, dim=(1, 2))) ** 2)
@@ -355,6 +349,7 @@ class StandardGraphCastLitModule(pl.LightningModule):
                 f"{stage_name}/loss_v_spatial": loss_v_spatial,
                 f"{stage_name}/loss_v_phase": v_phase_penalty,
                 f"{stage_name}/loss_mass_drift": mass_drift_penalty,
+                f"{stage_name}/loss_surf_mass": loss_surf_mass,
                 f"{stage_name}/loss_moisture_penalty": moisture_penalty,
             }
             self.log_dict(loss_components, prog_bar=False, sync_dist=True, on_step=True, on_epoch=True)
@@ -372,6 +367,7 @@ class StandardGraphCastLitModule(pl.LightningModule):
                 + (2.0 * loss_v_spatial)
                 + (1.0 * v_phase_penalty)
                 + (self.weight_mass_drift * mass_drift_penalty)
+                + (self.weight_mass_drift * loss_surf_mass)
                 + (self.lambda_moisture * moisture_penalty)
             )
 

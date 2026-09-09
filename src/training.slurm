@@ -30,6 +30,6 @@ cd /scratch5/purged/Wei.Huang/src/graphcast/src
 
 time PYTHONPATH=. python training/training.py \
   -c config.yaml \
-  --ckpt saved_checkpoints/last-v3.ckpt
+  --ckpt saved_checkpoints/graphcast_m6_epoch_epoch=07.ckpt
 
 # --ckpt checkpoints/graphcast_m6_epoch_epoch=04.ckpt \
