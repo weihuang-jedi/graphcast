@@ -24,7 +24,7 @@ model_params:
   in_channels: 15
   out_channels: 6
   history_steps: 2
-  rollout_steps: 2          # Increased from 2 to 4 steps (24h backprop unrolling)
+  rollout_steps: 4          # Increased from 2 to 4 steps (24h backprop unrolling)
   latent_dim: 256
   processor_layers: 16
   learning_rate: 1.0e-04
@@ -32,7 +32,7 @@ model_params:
 training_params:
   batch_size: 1
   accumulate_grad_batches: 4
-  max_epochs: 12
+  max_epochs: 15
   num_workers: 4
   gradient_clip_val: 0.5
   precision: "bf16-mixed"
@@ -42,6 +42,19 @@ loss_weights:
   weight_Q: 1.0
   weight_T: 1.0
   weight_U: 6.0              # Priority on zonal momentum retention
-  weight_V: 10.0             # Priority on meridional wave stability
+  weight_V: 12.0             # Priority on meridional wave stability
   weight_W: 1.0
-  lambda_moisture: 10.0
+
+  # Base State Regularizers
+  lambda_moisture: 2.0
+  weight_mass_drift: 10.0
+  weight_variance: 2.0
+  weight_v_spatial: 2.0
+  weight_v_phase: 1.0
+
+  # 3D Navier-Stokes & Kinetic Energy Extensions
+  weight_wind_ke: 0.5         # Kinetic energy loss penalty
+  weight_wind_dir: 0.5        # Wind direction cosine similarity penalty
+  weight_momentum_h: 0.02     # 3D Horizontal momentum residual loss weight
+  weight_momentum_v: 0.002    # Non-hydrostatic vertical momentum residual loss weight
+  weight_continuity: 0.01     # 3D Mass continuity residual loss weight

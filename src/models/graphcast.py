@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 GraphCast 3D Atmospheric Neural Network Module.
-Features True 3D Spherical Coordinate Spatial Derivatives for V-Wind Wave Preservation.
+Features True 3D Spherical Coordinate Spatial Derivatives and Vertical Level Message Passing
+to preserve meridional ($V$) wind waves and vertical atmospheric coupling.
 """
 
 import torch
@@ -28,24 +29,40 @@ class MLP(nn.Module):
 
 class SphericalSpatialInteractionBlock(nn.Module):
     """
-    Message Passing Block using True 3D Spherical Coordinate Differences
-    to preserve meridional ($V$) wind wave dynamics.
+    3D Message Passing Block using Spherical Horizontal Differences
+    and Vertical Level Edges across atmospheric columns.
     """
-    def __init__(self, latent_dim: int = 256):
+    def __init__(self, latent_dim: int = 256, num_levels: int = 32):
         super().__init__()
-        self.node_mlp = MLP(latent_dim * 2, latent_dim, latent_dim)
+        self.num_levels = num_levels
+        # Node MLP accepts: Self Features + Horizontal Edge Context + Vertical Edge Context (latent_dim * 3)
+        self.node_mlp = MLP(latent_dim * 3, latent_dim, latent_dim)
         self.spatial_mlp = MLP(latent_dim, latent_dim, latent_dim)
+        self.vertical_mlp = MLP(latent_dim, latent_dim, latent_dim)
 
     def forward(self, x_nodes: torch.Tensor, edge_index: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # Physical spatial feature gradient across node sequence
-        diff_fwd = x_nodes[:, 1:, :] - x_nodes[:, :-1, :]
-        diff_fwd_padded = torch.cat([diff_fwd, diff_fwd[:, -1:, :]], dim=1)
+        batch_size, num_flat, channels = x_nodes.shape
+        num_nodes = num_flat // self.num_levels
+
+        # 1. Reshape flat grid to 3D grid layout: (Batch, N_nodes, N_levels, Feature_dim)
+        x_3d = x_nodes.view(batch_size, num_nodes, self.num_levels, channels)
+
+        # 2. Horizontal Spherical Edge Difference along node sequence (dim=1)
+        diff_fwd = x_3d[:, 1:, :, :] - x_3d[:, :-1, :, :]
+        diff_fwd_padded = torch.cat([diff_fwd, diff_fwd[:, -1:, :, :]], dim=1)
         spatial_grad = self.spatial_mlp(diff_fwd_padded)
 
-        node_input = torch.cat([x_nodes, spatial_grad], dim=-1)
+        # 3. Vertical Level Message Passing Edges along vertical column (dim=2)
+        z_shift_up = torch.roll(x_3d, shifts=1, dims=2)
+        z_shift_down = torch.roll(x_3d, shifts=-1, dims=2)
+        vertical_diff = self.vertical_mlp(z_shift_up + z_shift_down - 2.0 * x_3d)
+
+        # 4. Fuse Horizontal + Vertical 3D Edge Context
+        node_input = torch.cat([x_3d, spatial_grad, vertical_diff], dim=-1)
         node_update = self.node_mlp(node_input)
 
-        return x_nodes + node_update
+        out_3d = x_3d + node_update
+        return out_3d.view(batch_size, num_flat, channels)
 
 
 class DeepGraphCastModel(nn.Module):
@@ -71,9 +88,9 @@ class DeepGraphCastModel(nn.Module):
         # 1. Grid Encoder
         self.encoder_in = MLP(in_channels, latent_dim, latent_dim)
 
-        # 2. Spatial Mesh Processor Stack
+        # 2. Spatial & Vertical Mesh Processor Stack
         self.processor_stack = nn.ModuleList([
-            SphericalSpatialInteractionBlock(latent_dim=latent_dim) for _ in range(processor_layers)
+            SphericalSpatialInteractionBlock(latent_dim=latent_dim, num_levels=num_levels) for _ in range(processor_layers)
         ])
 
         # 3. Grid Decoder
